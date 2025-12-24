@@ -1,6 +1,7 @@
 import Foundation
 import SQLite
 
+@MainActor
 class DatabaseManager {
     static let shared = DatabaseManager()
     private var db: Connection?

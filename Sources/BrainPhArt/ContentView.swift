@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @State private var recordingState: RecordingState = .idle
     @State private var selectedRecording: Recording? = nil
+    @State private var currentSessionId: String = ""
     
     var body: some View {
         VStack(spacing: 0) {
@@ -12,7 +13,10 @@ struct ContentView: View {
                 HistoryPanel(selectedRecording: $selectedRecording)
                     .frame(minWidth: 200, idealWidth: 250, maxWidth: 400)
                 
-                RecorderPanel(recordingState: $recordingState)
+                RecorderPanel(
+                    recordingState: $recordingState,
+                    currentSessionId: $currentSessionId
+                )
                     .frame(minWidth: 400)
             }
         }
@@ -58,6 +62,7 @@ struct HistoryPanel: View {
 
 struct RecorderPanel: View {
     @Binding var recordingState: RecordingState
+    @Binding var currentSessionId: String
     
     var body: some View {
         VStack(spacing: 20) {
@@ -68,8 +73,18 @@ struct RecorderPanel: View {
             Spacer()
             
             Button(action: {
-                recordingState = (recordingState == .idle) ? .recording : .idle
-                print(recordingState == .recording ? "START" : "STOP")
+                if recordingState == .idle {
+                    // START recording
+                    recordingState = .recording
+                    currentSessionId = DatabaseManager.shared.createSession()
+                    print("🔴 Started recording: \(currentSessionId)")
+                } else {
+                    // STOP recording
+                    recordingState = .idle
+                    DatabaseManager.shared.completeSession(id: currentSessionId)
+                    print("⏹️ Stopped recording: \(currentSessionId)")
+                    currentSessionId = ""
+                }
             }) {
                 Label(recordingState == .idle ? "START" : "STOP", 
                       systemImage: recordingState == .idle ? "record.circle" : "stop.circle")
@@ -78,6 +93,12 @@ struct RecorderPanel: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(recordingState == .idle ? .red : .gray)
+            
+            if recordingState == .recording {
+                Text("Recording session: \(currentSessionId)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
             
             Spacer()
         }
