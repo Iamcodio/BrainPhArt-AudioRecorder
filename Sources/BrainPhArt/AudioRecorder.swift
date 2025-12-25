@@ -30,10 +30,16 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private var consumerTask: Task<Void, Never>?
     private var shouldContinueProcessing = false
     private var recordingTimer: Timer?
-    
+
+    // Voice Activity Detection (VAD)
+    private let silenceThreshold: Float = 0.015  // Below this = silence
+    private let maxSilenceDuration: Double = 0.8  // Max silence to keep (seconds)
+    private var silenceSampleCount: Int = 0
+    private var isInSilence = false
+
     override init() {
         super.init()
-        print("✅ AudioRecorder initialized (Black Box Mode)")
+        print("✅ AudioRecorder initialized (Black Box Mode + VAD)")
     }
     
 
@@ -52,8 +58,9 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         bufferQueue.sync {
             audioBuffer = []
             chunkNumber = 0
+            silenceSampleCount = 0
         }
-        
+
         setupAudioEngine()
         startConsumerTask()
     }
@@ -135,7 +142,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         
         print("🎤 \(format.sampleRate)Hz, \(format.channelCount)ch")
         
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, time in
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, time in
             guard let self = self else { return }
 
             guard let channelData = buffer.floatChannelData else { return }
@@ -145,14 +152,29 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
             // Calculate RMS audio level for waveform
             let sumOfSquares = samples.reduce(0) { $0 + $1 * $1 }
             let rms = sqrt(sumOfSquares / Float(samples.count))
-            let level = min(1.0, rms * 5.0)  // Scale up for visibility
+            let level = min(1.0, rms * 12.0)
 
             Task { @MainActor [weak self] in
                 self?.audioLevel = level
             }
 
+            // Voice Activity Detection - skip long silences
+            let maxSilenceSamples = Int(self.maxSilenceDuration * self.sampleRate)
+
             self.bufferQueue.async {
-                self.audioBuffer.append(contentsOf: samples)
+                if rms < self.silenceThreshold {
+                    // In silence
+                    self.silenceSampleCount += frameLength
+                    if self.silenceSampleCount <= maxSilenceSamples {
+                        // Keep short silences (natural pauses)
+                        self.audioBuffer.append(contentsOf: samples)
+                    }
+                    // Skip long silences - don't append
+                } else {
+                    // Voice detected - reset silence counter and append
+                    self.silenceSampleCount = 0
+                    self.audioBuffer.append(contentsOf: samples)
+                }
             }
         }
         
@@ -277,39 +299,40 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private func writeWAV(samples: [Float], to url: URL, sampleRate: Double) throws {
         let sampleRateInt = Int32(sampleRate)
         let numChannels: Int16 = 1
-        let bitsPerSample: Int16 = 16
+        let bitsPerSample: Int16 = 32  // 32-bit for better quality
         let bytesPerSample = Int16(bitsPerSample / 8)
-        
-        let int16Samples = samples.map { sample in
-            Int16(max(-1.0, min(1.0, sample)) * 32767.0)
+
+        // Convert to 32-bit integer samples
+        let int32Samples = samples.map { sample in
+            Int32(max(-1.0, min(1.0, sample)) * 2147483647.0)
         }
         
         var data = Data()
-        
+
         data.append("RIFF".data(using: .ascii)!)
-        data.append(withUnsafeBytes(of: UInt32(36 + int16Samples.count * 2)) { Data($0) })
+        data.append(withUnsafeBytes(of: UInt32(36 + int32Samples.count * 4)) { Data($0) })
         data.append("WAVE".data(using: .ascii)!)
-        
+
         data.append("fmt ".data(using: .ascii)!)
         data.append(withUnsafeBytes(of: UInt32(16)) { Data($0) })
-        data.append(withUnsafeBytes(of: UInt16(1)) { Data($0) })
+        data.append(withUnsafeBytes(of: UInt16(1)) { Data($0) })  // PCM
         data.append(withUnsafeBytes(of: numChannels) { Data($0) })
         data.append(withUnsafeBytes(of: sampleRateInt) { Data($0) })
-        
+
         let byteRate = sampleRateInt * Int32(numChannels) * Int32(bytesPerSample)
         data.append(withUnsafeBytes(of: byteRate) { Data($0) })
-        
+
         let blockAlign = numChannels * bytesPerSample
         data.append(withUnsafeBytes(of: blockAlign) { Data($0) })
         data.append(withUnsafeBytes(of: bitsPerSample) { Data($0) })
-        
+
         data.append("data".data(using: .ascii)!)
-        data.append(withUnsafeBytes(of: UInt32(int16Samples.count * 2)) { Data($0) })
-        
-        for sample in int16Samples {
+        data.append(withUnsafeBytes(of: UInt32(int32Samples.count * 4)) { Data($0) })
+
+        for sample in int32Samples {
             data.append(withUnsafeBytes(of: sample) { Data($0) })
         }
-        
+
         try data.write(to: url)
     }
 }

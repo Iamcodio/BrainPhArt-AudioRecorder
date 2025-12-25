@@ -304,4 +304,69 @@ final class DatabaseManager {
 
         return paths
     }
+
+    func deleteSession(id: String) {
+        // Get chunk file paths first
+        let chunkPaths = getChunkPaths(sessionId: id)
+
+        // Delete audio files
+        for path in chunkPaths {
+            try? FileManager.default.removeItem(at: path)
+        }
+
+        // Delete from database
+        let deleteTranscripts = "DELETE FROM chunk_transcripts WHERE session_id = ?"
+        let deleteChunks = "DELETE FROM chunks WHERE session_id = ?"
+        let deleteSession = "DELETE FROM sessions WHERE id = ?"
+
+        do {
+            try db.run(deleteTranscripts, id)
+            try db.run(deleteChunks, id)
+            try db.run(deleteSession, id)
+            print("🗑️ Session deleted: \(id)")
+        } catch {
+            print("❌ Failed to delete session: \(error)")
+        }
+    }
+
+    func resetTranscriptionStatus(sessionId: String) {
+        let sql = """
+        UPDATE chunks
+        SET transcription_status = 'pending'
+        WHERE session_id = ?
+        """
+
+        // Also delete existing transcripts
+        let deleteTranscripts = "DELETE FROM chunk_transcripts WHERE session_id = ?"
+
+        do {
+            try db.run(sql, sessionId)
+            try db.run(deleteTranscripts, sessionId)
+            print("🔄 Transcription reset for session: \(sessionId)")
+        } catch {
+            print("❌ Failed to reset transcription: \(error)")
+        }
+    }
+
+    func getTranscriptionProgress(sessionId: String) -> Double {
+        let totalSql = "SELECT COUNT(*) FROM chunks WHERE session_id = ?"
+        let completedSql = "SELECT COUNT(*) FROM chunks WHERE session_id = ? AND transcription_status = 'complete'"
+
+        do {
+            var total = 0
+            var completed = 0
+
+            for row in try db.prepare(totalSql, sessionId) {
+                total = Int(row[0] as? Int64 ?? 0)
+            }
+            for row in try db.prepare(completedSql, sessionId) {
+                completed = Int(row[0] as? Int64 ?? 0)
+            }
+
+            if total == 0 { return 0 }
+            return Double(completed) / Double(total)
+        } catch {
+            return 0
+        }
+    }
 }

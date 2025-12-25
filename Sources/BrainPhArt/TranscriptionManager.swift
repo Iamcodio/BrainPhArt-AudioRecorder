@@ -44,7 +44,7 @@ actor TranscriptionManager {
 
         let segments = try await whisper.transcribe(audioFrames: audioFrames)
 
-        let transcript = segments.map { $0.text }.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        let transcript = segments.map { $0.text }.joined(separator: " ").trimmingCharacters(in: CharacterSet.whitespaces)
 
         print("📝 Transcribed: \(transcript.prefix(50))...")
 

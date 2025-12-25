@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>BrainPhArt</string>
+    <key>CFBundleDisplayName</key>
+    <string>BrainPhArt</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.brainphart.recorder</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>BrainPhArt</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <false/>
+
+    <!-- Microphone Permission -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>BrainPhArt needs microphone access to record audio for transcription.</string>
+
+    <!-- Accessibility Permission (for auto-paste) -->
+    <key>NSAccessibilityUsageDescription</key>
+    <string>BrainPhArt needs accessibility access to automatically paste transcriptions into text fields.</string>
+
+    <!-- Apple Events (for keyboard simulation) -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>BrainPhArt needs to simulate keyboard events to paste transcriptions.</string>
+
+    <!-- High Resolution Capable -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- Supports Secure Restorable State -->
+    <key>NSSupportsSecureRestorableState</key>
+    <true/>
+
+    <!-- Principal Class -->
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>
