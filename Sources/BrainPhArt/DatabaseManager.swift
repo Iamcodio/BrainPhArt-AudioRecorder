@@ -1,169 +1,281 @@
 import Foundation
 import SQLite
 
-@MainActor
-class DatabaseManager {
-    static let shared = DatabaseManager()
-    private var db: Connection?
-    
-    private let sessions = Table("sessions")
-    private let sessionId = Expression<String>("id")
-    private let sessionCreatedAt = Expression<Int64>("created_at")
-    private let sessionCompletedAt = Expression<Int64?>("completed_at")
-    private let sessionStatus = Expression<String>("status")
-    private let sessionChunkCount = Expression<Int>("chunk_count")
-    
-    private let chunks = Table("chunks")
-    private let chunkId = Expression<String>("id")
-    private let chunkSessionId = Expression<String>("session_id")
-    private let chunkNumber = Expression<Int>("chunk_num")
-    private let chunkFilePath = Expression<String>("file_path")
-    private let chunkDuration = Expression<Int>("duration_ms")
-    private let chunkCreatedAt = Expression<Int64>("created_at")
-    
+final class DatabaseManager {
+    nonisolated(unsafe) static let shared = DatabaseManager()
+
+    private var db: Connection!
+
     private init() {
-        setupDatabase()
-    }
-    
-    private func setupDatabase() {
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/brainphart")
+
+        try? FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+
+        let dbPath = path.appendingPathComponent("database.db").path
+
         do {
-            let fileManager = FileManager.default
-            let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            let appFolder = appSupport.appendingPathComponent("brainphart")
-            
-            if !fileManager.fileExists(atPath: appFolder.path) {
-                try fileManager.createDirectory(at: appFolder, withIntermediateDirectories: true)
-            }
-            
-            let dbPath = appFolder.appendingPathComponent("database.db").path
             db = try Connection(dbPath)
+            try db.execute("PRAGMA foreign_keys = ON")
             print("✅ Database opened at: \(dbPath)")
-            
-            try createTables()
-            
+            createTables()
         } catch {
-            print("❌ Database setup failed: \(error)")
+            print("❌ Database error: \(error)")
         }
     }
     
-    private func createTables() throws {
-        guard let db = db else { return }
+    private func createTables() {
+        let sessionsTable = """
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            created_at INTEGER NOT NULL,
+            completed_at INTEGER,
+            status TEXT NOT NULL,
+            chunk_count INTEGER DEFAULT 0
+        )
+        """
         
-        try db.run(sessions.create(ifNotExists: true) { t in
-            t.column(sessionId, primaryKey: true)
-            t.column(sessionCreatedAt)
-            t.column(sessionCompletedAt)
-            t.column(sessionStatus)
-            t.column(sessionChunkCount, defaultValue: 0)
-        })
+        let chunksTable = """
+        CREATE TABLE IF NOT EXISTS chunks (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            chunk_num INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            duration_ms INTEGER,
+            created_at INTEGER NOT NULL,
+            transcription_status TEXT DEFAULT 'pending',
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )
+        """
         
-        try db.run(chunks.create(ifNotExists: true) { t in
-            t.column(chunkId, primaryKey: true)
-            t.column(chunkSessionId)
-            t.column(chunkNumber)
-            t.column(chunkFilePath)
-            t.column(chunkDuration)
-            t.column(chunkCreatedAt)
-            t.foreignKey(chunkSessionId, references: sessions, sessionId, delete: .cascade)
-        })
-        
-        print("✅ Tables created")
-    }
-    
-    func createSession() -> String {
-        guard let db = db else { return "" }
-        
-        let id = UUID().uuidString
-        let now = Int64(Date().timeIntervalSince1970)
+        let transcriptsTable = """
+        CREATE TABLE IF NOT EXISTS chunk_transcripts (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            chunk_number INTEGER NOT NULL,
+            transcript TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )
+        """
         
         do {
-            try db.run(sessions.insert(
-                sessionId <- id,
-                sessionCreatedAt <- now,
-                sessionStatus <- "recording",
-                sessionChunkCount <- 0
-            ))
+            try db.execute(sessionsTable)
+            try db.execute(chunksTable)
+            try db.execute(transcriptsTable)
+
+            // Add transcription_status column if it doesn't exist (migration)
+            let alterTableSQL = "ALTER TABLE chunks ADD COLUMN transcription_status TEXT DEFAULT 'pending'"
+            do {
+                try db.execute(alterTableSQL)
+                print("✅ Added transcription_status column")
+            } catch {
+                // Column likely already exists, ignore error
+            }
+
+            print("✅ Tables created")
+        } catch {
+            print("❌ Table creation error: \(error)")
+        }
+    }
+    
+    func createSession(id: String) {
+        let sql = """
+        INSERT INTO sessions (id, created_at, status, chunk_count)
+        VALUES (?, ?, 'recording', 0)
+        """
+        
+        let timestamp = Int(Date().timeIntervalSince1970)
+        
+        do {
+            try db.run(sql, id, timestamp)
             print("✅ Session created: \(id)")
-            return id
         } catch {
             print("❌ Failed to create session: \(error)")
-            return ""
         }
     }
     
     func completeSession(id: String) {
-        guard let db = db else { return }
-        
-        let session = sessions.filter(sessionId == id)
-        let now = Int64(Date().timeIntervalSince1970)
-        
+        let sql = """
+        UPDATE sessions
+        SET completed_at = ?, status = 'complete'
+        WHERE id = ?
+        """
+
+        let timestamp = Int(Date().timeIntervalSince1970)
+
         do {
-            try db.run(session.update(
-                sessionStatus <- "complete",
-                sessionCompletedAt <- now
-            ))
+            try db.run(sql, timestamp, id)
             print("✅ Session completed: \(id)")
         } catch {
             print("❌ Failed to complete session: \(error)")
         }
     }
+
+    func cancelSession(id: String) {
+        let sql = """
+        UPDATE sessions
+        SET completed_at = ?, status = 'cancelled'
+        WHERE id = ?
+        """
+
+        let timestamp = Int(Date().timeIntervalSince1970)
+
+        do {
+            try db.run(sql, timestamp, id)
+            print("⚠️ Session cancelled: \(id)")
+        } catch {
+            print("❌ Failed to cancel session: \(error)")
+        }
+    }
     
-    func loadSessions() -> [(id: String, createdAt: Int64, status: String, chunkCount: Int)] {
-        guard let db = db else { return [] }
+    func createChunk(id: String, sessionId: String, chunkNumber: Int, filePath: String, durationMs: Int) {
+        let sql = """
+        INSERT INTO chunks (id, session_id, chunk_num, file_path, duration_ms, created_at, transcription_status)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        """
+
+        let timestamp = Int(Date().timeIntervalSince1970)
+
+        do {
+            try db.run(sql, id, sessionId, chunkNumber, filePath, durationMs, timestamp)
+        } catch {
+            print("❌ Failed to create chunk: \(error)")
+        }
+    }
+    
+    func getAllSessions() -> [Recording] {
+        let sql = "SELECT id, created_at, completed_at, status, chunk_count FROM sessions ORDER BY created_at DESC"
         
-        var results: [(String, Int64, String, Int)] = []
+        var sessions: [Recording] = []
         
         do {
-            for session in try db.prepare(sessions.order(sessionCreatedAt.desc)) {
-                results.append((
-                    session[sessionId],
-                    session[sessionCreatedAt],
-                    session[sessionStatus],
-                    session[sessionChunkCount]
-                ))
+            let stmt = try db.prepare(sql)
+            for row in stmt {
+                let recording = Recording(
+                    id: row[0] as? String ?? "",
+                    createdAt: Int(row[1] as? Int64 ?? 0),
+                    completedAt: (row[2] as? Int64).map { Int($0) },
+                    status: row[3] as? String ?? "unknown",
+                    chunkCount: Int(row[4] as? Int64 ?? 0)
+                )
+                sessions.append(recording)
             }
         } catch {
             print("❌ Failed to load sessions: \(error)")
         }
         
-        return results
+        return sessions
     }
     
-    func deleteSession(id: String) {
-        guard let db = db else { return }
+    func saveTranscript(sessionId: String, chunkNumber: Int, transcript: String) {
+        let sql = """
+        INSERT OR REPLACE INTO chunk_transcripts 
+        (id, session_id, chunk_number, transcript, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """
         
-        let session = sessions.filter(sessionId == id)
+        let id = UUID().uuidString
+        let timestamp = Int(Date().timeIntervalSince1970)
         
         do {
-            try db.run(session.delete())
-            print("✅ Session deleted: \(id)")
+            try db.run(sql, id, sessionId, chunkNumber, transcript, timestamp)
+            print("📝 Saved transcript for chunk \(chunkNumber)")
         } catch {
-            print("❌ Failed to delete session: \(error)")
+            print("❌ Failed to save transcript: \(error)")
         }
     }
     
-    func saveChunk(sessionId: String, chunkNum: Int, filePath: String, durationMs: Int) {
-        guard let db = db else { return }
+    func getTranscript(sessionId: String) -> String {
+        let sql = """
+        SELECT transcript FROM chunk_transcripts 
+        WHERE session_id = ? 
+        ORDER BY chunk_number ASC
+        """
         
-        let id = UUID().uuidString
-        let now = Int64(Date().timeIntervalSince1970)
+        var transcripts: [String] = []
         
         do {
-            try db.run(chunks.insert(
-                chunkId <- id,
-                chunkSessionId <- sessionId,
-                chunkNumber <- chunkNum,
-                chunkFilePath <- filePath,
-                chunkDuration <- durationMs,
-                chunkCreatedAt <- now
-            ))
-            
-            let session = sessions.filter(self.sessionId == sessionId)
-            try db.run(session.update(sessionChunkCount <- sessionChunkCount + 1))
-            
-            print("✅ Chunk saved: \(chunkNum) for session \(sessionId)")
+            let stmt = try db.prepare(sql, sessionId)
+            for row in stmt {
+                if let text = row[0] as? String {
+                    transcripts.append(text)
+                }
+            }
         } catch {
-            print("❌ Failed to save chunk: \(error)")
+            print("❌ Failed to load transcript: \(error)")
+        }
+        
+        return transcripts.joined(separator: "\n\n")
+    }
+
+    func updateFullTranscript(sessionId: String, transcript: String) {
+        // Delete existing transcripts for this session
+        let deleteSql = "DELETE FROM chunk_transcripts WHERE session_id = ?"
+
+        do {
+            try db.run(deleteSql, sessionId)
+        } catch {
+            print("❌ Failed to delete old transcripts: \(error)")
+        }
+
+        // Insert new full transcript as chunk 0
+        let insertSql = """
+        INSERT INTO chunk_transcripts
+        (id, session_id, chunk_number, transcript, created_at)
+        VALUES (?, ?, 0, ?, ?)
+        """
+
+        let id = UUID().uuidString
+        let timestamp = Int(Date().timeIntervalSince1970)
+
+        do {
+            try db.run(insertSql, id, sessionId, transcript, timestamp)
+            print("✅ Full transcript saved for session: \(sessionId)")
+        } catch {
+            print("❌ Failed to save full transcript: \(error)")
+        }
+    }
+
+    func getPendingChunks() -> [(id: String, sessionId: String, filePath: String, chunkNumber: Int)] {
+        let sql = """
+        SELECT id, session_id, file_path, chunk_num
+        FROM chunks
+        WHERE transcription_status = 'pending'
+        ORDER BY created_at ASC
+        """
+
+        var pendingChunks: [(id: String, sessionId: String, filePath: String, chunkNumber: Int)] = []
+
+        do {
+            let stmt = try db.prepare(sql)
+            for row in stmt {
+                let chunk = (
+                    id: row[0] as? String ?? "",
+                    sessionId: row[1] as? String ?? "",
+                    filePath: row[2] as? String ?? "",
+                    chunkNumber: Int(row[3] as? Int64 ?? 0)
+                )
+                pendingChunks.append(chunk)
+            }
+        } catch {
+            print("❌ Failed to load pending chunks: \(error)")
+        }
+
+        return pendingChunks
+    }
+
+    func updateChunkTranscriptionStatus(chunkId: String, status: String) {
+        let sql = """
+        UPDATE chunks
+        SET transcription_status = ?
+        WHERE id = ?
+        """
+
+        do {
+            try db.run(sql, status, chunkId)
+        } catch {
+            print("❌ Failed to update transcription status: \(error)")
         }
     }
 }
