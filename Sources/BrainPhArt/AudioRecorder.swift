@@ -77,6 +77,20 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         consumerTask?.cancel()
         consumerTask = nil
 
+        // IMPORTANT: Save any remaining audio in buffer (for short recordings < 32s)
+        var finalSamples: [Float]?
+        bufferQueue.sync {
+            if !audioBuffer.isEmpty {
+                finalSamples = audioBuffer
+                audioBuffer = []
+            }
+        }
+
+        if let samples = finalSamples, !samples.isEmpty {
+            print("💾 Saving final chunk with \(samples.count) samples")
+            _ = saveChunk(samples: samples, isFinal: true)
+        }
+
         // Mark session complete before clearing
         if !currentSessionId.isEmpty {
             DatabaseManager.shared.completeSession(id: currentSessionId)

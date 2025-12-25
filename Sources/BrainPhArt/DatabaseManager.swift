@@ -278,4 +278,30 @@ final class DatabaseManager {
             print("❌ Failed to update transcription status: \(error)")
         }
     }
+
+    func getChunkPaths(sessionId: String) -> [URL] {
+        let sql = """
+        SELECT file_path FROM chunks
+        WHERE session_id = ?
+        ORDER BY chunk_num ASC
+        """
+
+        var paths: [URL] = []
+
+        do {
+            let stmt = try db.prepare(sql, sessionId)
+            for row in stmt {
+                if let filePath = row[0] as? String {
+                    let url = URL(fileURLWithPath: filePath)
+                    if FileManager.default.fileExists(atPath: filePath) {
+                        paths.append(url)
+                    }
+                }
+            }
+        } catch {
+            print("❌ Failed to get chunk paths: \(error)")
+        }
+
+        return paths
+    }
 }

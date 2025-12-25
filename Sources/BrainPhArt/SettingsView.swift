@@ -7,14 +7,12 @@ import CoreAudio
 struct SettingsView: View {
     @Binding var isPresented: Bool
     @StateObject private var audioDevices = AudioDeviceManager()
+    @StateObject private var audioTester = AudioTester()
 
     @AppStorage("inputDeviceID") private var inputDeviceID: String = ""
     @AppStorage("outputDeviceID") private var outputDeviceID: String = ""
     @AppStorage("inputLevel") private var inputLevel: Double = 0.8
     @AppStorage("outputLevel") private var outputLevel: Double = 1.0
-
-    @State private var testLevel: Float = 0.0
-    @State private var isTesting: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -77,8 +75,30 @@ struct SettingsView: View {
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundColor(.secondary)
                             Spacer()
-                            Button(action: toggleTest) {
-                                Text(isTesting ? "Stop" : "Test")
+
+                            // Status indicator
+                            if audioTester.testResult == .success {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                    Text("Device Working")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.green)
+                                }
+                            } else if audioTester.testResult == .failed {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.red)
+                                    Text("No Signal")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.red)
+                                }
+                            }
+
+                            Button(action: {
+                                audioTester.runTest()
+                            }) {
+                                Text(audioTester.isRunning ? "Testing..." : "Test")
                                     .font(.system(size: 11, weight: .medium))
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 4)
@@ -86,19 +106,40 @@ struct SettingsView: View {
                                     .cornerRadius(4)
                             }
                             .buttonStyle(.plain)
+                            .disabled(audioTester.isRunning)
                         }
 
-                        // Level meter
+                        // Level meter with clipping gradient
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
+                                // Background
                                 RoundedRectangle(cornerRadius: 2)
                                     .fill(Color.primary.opacity(0.1))
+
+                                // Clipping zone markers (last 20%)
+                                HStack(spacing: 0) {
+                                    Rectangle()
+                                        .fill(Color.clear)
+                                        .frame(width: geo.size.width * 0.8)
+                                    Rectangle()
+                                        .fill(Color.red.opacity(0.15))
+                                        .frame(width: geo.size.width * 0.2)
+                                }
+                                .cornerRadius(2)
+
+                                // Level bar with gradient
                                 RoundedRectangle(cornerRadius: 2)
-                                    .fill(Color.primary.opacity(0.5))
-                                    .frame(width: geo.size.width * CGFloat(testLevel))
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [.green, .yellow, .orange, .red],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
+                                    )
+                                    .frame(width: geo.size.width * CGFloat(audioTester.level))
                             }
                         }
-                        .frame(height: 8)
+                        .frame(height: 10)
                     }
 
                     Divider()
@@ -182,39 +223,120 @@ struct SettingsView: View {
         .background(Color(NSColor.windowBackgroundColor))
     }
 
-    private func toggleTest() {
-        isTesting.toggle()
-        if isTesting {
-            startLevelMonitoring()
-        } else {
-            stopLevelMonitoring()
-        }
-    }
+}
 
-    private func startLevelMonitoring() {
-        // Simple level test using AVAudioEngine
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
+// MARK: - Audio Tester (simple AVAudioRecorder approach)
 
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            guard let channelData = buffer.floatChannelData else { return }
-            let samples = UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength))
-            let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
-            DispatchQueue.main.async {
-                self.testLevel = min(1.0, rms * 5.0)
-            }
-        }
+enum TestResult {
+    case none
+    case success
+    case failed
+}
+
+@MainActor
+class AudioTester: ObservableObject {
+    @Published var isRunning = false
+    @Published var level: Float = 0.0
+    @Published var testResult: TestResult = .none
+
+    private var recorder: AVAudioRecorder?
+    private var timer: Timer?
+    private var peakLevel: Float = -160.0
+
+    func runTest() {
+        testResult = .none
+        peakLevel = -160.0
+        isRunning = true
+        level = 0
+
+        print("🎤 ========== AUDIO TEST STARTING ==========")
+
+        // Setup audio session
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_\(UUID().uuidString).wav")
+
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 44100.0,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+        ]
 
         do {
-            try engine.start()
+            recorder = try AVAudioRecorder(url: tempURL, settings: settings)
+            recorder?.isMeteringEnabled = true
+            recorder?.prepareToRecord()
+
+            guard recorder?.record() == true else {
+                print("❌ Could not start recording")
+                testFailed()
+                return
+            }
+
+            print("✅ Test recording started")
+
+            // Poll levels every 100ms
+            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.updateLevel()
+                }
+            }
+
+            // Stop after 10 seconds (gives time to adjust levels)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+                self?.finishTest(tempURL: tempURL)
+            }
+
         } catch {
-            print("Test failed: \(error)")
+            print("❌ Test setup error: \(error.localizedDescription)")
+            testFailed()
         }
     }
 
-    private func stopLevelMonitoring() {
-        testLevel = 0
+    private func updateLevel() {
+        recorder?.updateMeters()
+        let db = recorder?.averagePower(forChannel: 0) ?? -160.0
+
+        // Convert dB to 0-1 range (dB is typically -160 to 0)
+        let normalized = max(0, (db + 50) / 50)
+        level = Float(normalized)
+
+        if db > peakLevel {
+            peakLevel = db
+        }
+    }
+
+    private func finishTest(tempURL: URL) {
+        timer?.invalidate()
+        timer = nil
+        recorder?.stop()
+        recorder = nil
+
+        // Clean up temp file
+        try? FileManager.default.removeItem(at: tempURL)
+
+        print("🎤 Peak level: \(peakLevel) dB")
+
+        // If peak > -40dB, we detected sound
+        if peakLevel > -40 {
+            testResult = .success
+            print("✅ ========== DEVICE WORKING ==========")
+        } else {
+            testResult = .failed
+            print("❌ ========== NO SIGNAL DETECTED ==========")
+        }
+
+        isRunning = false
+        level = 0
+    }
+
+    private func testFailed() {
+        timer?.invalidate()
+        timer = nil
+        recorder?.stop()
+        recorder = nil
+        testResult = .failed
+        isRunning = false
+        level = 0
     }
 }
 

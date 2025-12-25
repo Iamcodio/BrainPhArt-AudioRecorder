@@ -11,6 +11,11 @@ struct ContentView: View {
     @State private var showPreview: Bool = true
     @State private var isFloatingMode: Bool = false
     @State private var showSettings: Bool = false
+    @State private var alertMessage: String = ""
+    @State private var showAlert: Bool = false
+
+    // Auto-refresh timer for transcript updates
+    let transcriptRefreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
@@ -45,40 +50,88 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(isPresented: $showSettings)
         }
+        .alert("BrainPhArt", isPresented: $showAlert) {
+            Button("OK") { }
+        } message: {
+            Text(alertMessage)
+        }
+        // Auto-refresh transcript every 2 seconds
+        .onReceive(transcriptRefreshTimer) { _ in
+            refreshSelectedTranscript()
+        }
         // Global hotkey: Cmd+Shift+R toggles floating mode
         .keyboardShortcut("r", modifiers: [.command, .shift])
+    }
+
+    private func refreshSelectedTranscript() {
+        guard let selected = selectedRecording else { return }
+
+        // Get latest transcript from DB
+        let latestTranscript = DatabaseManager.shared.getTranscript(sessionId: selected.id)
+
+        // Only update if transcript changed and user hasn't edited it
+        if latestTranscript != selected.transcript && !latestTranscript.isEmpty {
+            // Update the recording item
+            if let index = recordings.firstIndex(where: { $0.id == selected.id }) {
+                recordings[index] = RecordingItem(
+                    id: selected.id,
+                    createdAt: selected.createdAt,
+                    transcript: latestTranscript,
+                    status: selected.status
+                )
+                selectedRecording = recordings[index]
+                editedTranscript = latestTranscript
+                print("📝 Transcript updated: \(latestTranscript.prefix(50))...")
+            }
+        }
     }
 
     private func handleStartStop() {
         if recordingState == .idle {
             let sessionId = UUID().uuidString
+
+            print("🔴 ========== RECORDING STARTED ==========")
+            print("🔴 Session ID: \(sessionId)")
+
             DatabaseManager.shared.createSession(id: sessionId)
+            recordingState = .recording
+
+            alertMessage = "Recording Started!"
+            showAlert = true
 
             Task {
                 await audioRecorder.startRecording(sessionId: sessionId)
-                await MainActor.run {
-                    recordingState = .recording
-                }
             }
         } else {
-            Task {
-                await audioRecorder.stopRecording()
-                await MainActor.run {
-                    recordingState = .idle
-                    loadRecordings()
-                }
+            print("⏹️ ========== RECORDING STOPPED ==========")
+
+            audioRecorder.stopRecording()
+            recordingState = .idle
+
+            print("💾 ========== AUDIO SAVED TO DATABASE ==========")
+
+            alertMessage = "Recording Stopped - Audio Saved to Database!"
+            showAlert = true
+
+            loadRecordings()
+
+            // Select the newly created recording (first in list since sorted by date DESC)
+            if let newRecording = recordings.first {
+                selectRecording(newRecording)
             }
         }
     }
 
     private func handleCancel() {
-        Task {
-            await audioRecorder.cancelRecording()
-            await MainActor.run {
-                recordingState = .idle
-                loadRecordings()
-            }
-        }
+        print("❌ ========== RECORDING CANCELLED ==========")
+
+        audioRecorder.cancelRecording()
+        recordingState = .idle
+
+        alertMessage = "Recording Cancelled"
+        showAlert = true
+
+        loadRecordings()
     }
 
     private func loadRecordings() {
@@ -196,6 +249,11 @@ struct MainView: View {
                 onStop: onStartStop,
                 onCancel: onCancel
             )
+
+            Divider()
+
+            // Bottom: Playback Module
+            PlaybackModule(selectedRecording: selectedRecording)
         }
         .frame(minWidth: 1000, minHeight: 700)
     }
