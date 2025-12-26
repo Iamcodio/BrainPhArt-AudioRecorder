@@ -50,10 +50,22 @@ struct BrainPhArtApp: App {
 
 // MARK: - App State
 
+enum WindowMode {
+    case micro    // Tiny pill
+    case medium   // Floating recorder with controls
+    case full     // Main UI with history
+}
+
 @MainActor
 class AppState: ObservableObject {
     static let shared = AppState()
-    @Published var isFloatingMode = true
+    @Published var windowMode: WindowMode = .full  // Opens to main window by default
+
+    // Legacy compatibility
+    var isFloatingMode: Bool {
+        get { windowMode != .full }
+        set { windowMode = newValue ? .micro : .full }
+    }
 }
 
 // MARK: - App Delegate
@@ -63,9 +75,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var floatingPanel: FloatingPanel?
     let appState = AppState.shared
 
-    // Window sizes
-    private let floatingSize = NSSize(width: 340, height: 100)
-    private let expandedSize = NSSize(width: 1200, height: 800)
+    // Window sizes for 3 modes
+    private let microSize = NSSize(width: 200, height: 52)     // Tiny pill
+    private let mediumSize = NSSize(width: 340, height: 100)   // Floating recorder
+    private let fullSize = NSSize(width: 1200, height: 800)    // Main UI
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
@@ -83,14 +96,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Create the panel
+        // Create the panel - start in FULL mode with title bar
         guard let screen = NSScreen.main else { return }
         let screenFrame = screen.visibleFrame
-        let x = (screenFrame.width - floatingSize.width) / 2 + screenFrame.origin.x
-        let y = screenFrame.maxY - floatingSize.height - 40
+
+        // Start with full size, centered
+        let startWidth: CGFloat = 1100
+        let startHeight: CGFloat = 700
+        let x = (screenFrame.width - startWidth) / 2 + screenFrame.origin.x
+        let y = (screenFrame.height - startHeight) / 2 + screenFrame.origin.y
 
         let panel = FloatingPanel(
-            contentRect: NSRect(x: x, y: y, width: floatingSize.width, height: floatingSize.height)
+            contentRect: NSRect(x: x, y: y, width: startWidth, height: startHeight),
+            showsTitleBar: true  // Show traffic lights and allow resize
         )
 
         // Embed SwiftUI ContentView
@@ -105,45 +123,69 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         floatingPanel = panel
 
         // Watch for mode changes
-        appState.$isFloatingMode
+        appState.$windowMode
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] floating in
-                self?.updateWindowForMode(floating: floating)
+            .sink { [weak self] mode in
+                self?.updateWindowForMode(mode)
             }
             .store(in: &cancellables)
     }
 
     private var cancellables = Set<AnyCancellable>()
 
-    func updateWindowForMode(floating: Bool) {
+    func updateWindowForMode(_ mode: WindowMode) {
         guard let panel = floatingPanel else { return }
 
-        if floating {
-            // Floating mode - on top, compact
+        switch mode {
+        case .micro:
+            // Tiny pill - floating, on top
             panel.level = .floating
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
 
             if let screen = NSScreen.main {
                 let screenFrame = screen.visibleFrame
-                let x = (screenFrame.width - floatingSize.width) / 2 + screenFrame.origin.x
-                let y = screenFrame.maxY - floatingSize.height - 40
+                let x = (screenFrame.width - microSize.width) / 2 + screenFrame.origin.x
+                let y = screenFrame.maxY - microSize.height - 40
                 panel.setFrame(
-                    NSRect(x: x, y: y, width: floatingSize.width, height: floatingSize.height),
+                    NSRect(x: x, y: y, width: microSize.width, height: microSize.height),
                     display: true,
                     animate: true
                 )
             }
-        } else {
-            // Expanded mode - normal level, larger
-            panel.level = .normal
-            panel.collectionBehavior = [.managed, .fullScreenPrimary]
+
+        case .medium:
+            // Medium floating recorder - floating, on top
+            panel.level = .floating
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
 
             if let screen = NSScreen.main {
                 let screenFrame = screen.visibleFrame
-                let x = (screenFrame.width - expandedSize.width) / 2 + screenFrame.origin.x
-                let y = (screenFrame.height - expandedSize.height) / 2 + screenFrame.origin.y
+                let x = (screenFrame.width - mediumSize.width) / 2 + screenFrame.origin.x
+                let y = screenFrame.maxY - mediumSize.height - 40
                 panel.setFrame(
-                    NSRect(x: x, y: y, width: expandedSize.width, height: expandedSize.height),
+                    NSRect(x: x, y: y, width: mediumSize.width, height: mediumSize.height),
+                    display: true,
+                    animate: true
+                )
+            }
+
+        case .full:
+            // Full main UI - normal level, larger, opaque
+            panel.level = .normal
+            panel.collectionBehavior = [.managed, .fullScreenPrimary]
+            panel.isOpaque = true
+            panel.backgroundColor = NSColor.windowBackgroundColor
+
+            if let screen = NSScreen.main {
+                let screenFrame = screen.visibleFrame
+                let x = (screenFrame.width - fullSize.width) / 2 + screenFrame.origin.x
+                let y = (screenFrame.height - fullSize.height) / 2 + screenFrame.origin.y
+                panel.setFrame(
+                    NSRect(x: x, y: y, width: fullSize.width, height: fullSize.height),
                     display: true,
                     animate: true
                 )
@@ -174,13 +216,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     static func handleGlobalKeyEvent(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
         // Ctrl+Shift+Space - Toggle recording
-        if modifiers.contains([.control, .shift]) && keyCode == 49 {
+        let hasCtrl = modifiers.contains(.control)
+        let hasShift = modifiers.contains(.shift)
+        let isSpace = keyCode == 49
+
+        if hasCtrl && hasShift && isSpace {
+            print("🎤 Hotkey triggered: Ctrl+Shift+Space")
+            // Show the app first
+            NSApp.activate(ignoringOtherApps: true)
+            if let delegate = NSApp.delegate as? AppDelegate {
+                delegate.floatingPanel?.makeKeyAndOrderFront(nil)
+            }
+            // Then toggle recording
             NotificationCenter.default.post(name: .toggleRecording, object: nil)
         }
 
-        // Escape - Cancel recording
+        // Escape - Cancel recording or close panel
         if keyCode == 53 {
             NotificationCenter.default.post(name: .cancelRecording, object: nil)
+            // Also hide panel if in floating mode
+            if let delegate = NSApp.delegate as? AppDelegate,
+               delegate.appState.isFloatingMode {
+                delegate.floatingPanel?.orderOut(nil)
+            }
         }
     }
 
@@ -198,4 +256,5 @@ import Combine
 extension Notification.Name {
     static let toggleRecording = Notification.Name("toggleRecording")
     static let cancelRecording = Notification.Name("cancelRecording")
+    static let openSettings = Notification.Name("openSettings")
 }

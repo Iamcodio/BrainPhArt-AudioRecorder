@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var editedTranscript: String = ""
     @State private var showPreview: Bool = true
     @State private var showSettings: Bool = false
+    @State private var unreviewedPIICount: Int = 0
 
     // Auto-refresh timer for transcript updates
     let transcriptRefreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
@@ -18,18 +19,30 @@ struct ContentView: View {
     // Global hotkey notifications
     let toggleRecordingPublisher = NotificationCenter.default.publisher(for: .toggleRecording)
     let cancelRecordingPublisher = NotificationCenter.default.publisher(for: .cancelRecording)
+    let openSettingsPublisher = NotificationCenter.default.publisher(for: .openSettings)
 
     var body: some View {
         Group {
-            if appState.isFloatingMode {
-                FloatingRecorderView(
+            switch appState.windowMode {
+            case .micro:
+                UltraCompactRecorderView(
                     audioRecorder: audioRecorder,
                     recordingState: $recordingState,
-                    isFloatingMode: $appState.isFloatingMode,
                     onStartStop: handleStartStop,
                     onCancel: handleCancel
                 )
-            } else {
+                .padding(8)
+
+            case .medium:
+                FloatingRecorderView(
+                    audioRecorder: audioRecorder,
+                    recordingState: $recordingState,
+                    isFloatingMode: .constant(true),
+                    onStartStop: handleStartStop,
+                    onCancel: handleCancel
+                )
+
+            case .full:
                 MainView(
                     audioRecorder: audioRecorder,
                     recordingState: $recordingState,
@@ -39,6 +52,7 @@ struct ContentView: View {
                     showPreview: $showPreview,
                     isFloatingMode: $appState.isFloatingMode,
                     showSettings: $showSettings,
+                    unreviewedPIICount: unreviewedPIICount,
                     onStartStop: handleStartStop,
                     onCancel: handleCancel,
                     onSelect: selectRecording,
@@ -68,6 +82,9 @@ struct ContentView: View {
             if recordingState == .recording {
                 handleCancel()
             }
+        }
+        .onReceive(openSettingsPublisher) { _ in
+            showSettings = true
         }
     }
 
@@ -104,7 +121,52 @@ struct ContentView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     simulatePaste()
                 }
+
+                // Scan for PII after transcription completes
+                scanTranscriptForPII(sessionId: selected.id, transcript: latestTranscript)
             }
+        }
+    }
+
+    /// Scans transcript for PII and saves tags to database
+    private func scanTranscriptForPII(sessionId: String, transcript: String) {
+        print("🔍 scanTranscriptForPII called for session \(sessionId.prefix(8)), transcript length: \(transcript.count)")
+
+        // Skip if transcript is empty
+        guard !transcript.isEmpty else {
+            unreviewedPIICount = 0
+            print("🔍 Skipping - empty transcript")
+            return
+        }
+
+        // Check if tags already exist for this session (avoid duplicates)
+        let existingTags = DatabaseManager.shared.getPrivacyTags(sessionId: sessionId)
+        if !existingTags.isEmpty {
+            // Just update the count
+            unreviewedPIICount = DatabaseManager.shared.getUnreviewedCount(sessionId: sessionId)
+            print("🔍 Tags already exist: \(existingTags.count), unreviewed: \(unreviewedPIICount)")
+            return
+        }
+
+        // Scan for PII matches (regex + topic keywords)
+        let matches = PrivacyScanner.fullScan(transcript)
+        print("🔍 Scanner found \(matches.count) matches (regex + topics)")
+
+        // Save each match as a privacy tag
+        for match in matches {
+            DatabaseManager.shared.savePrivacyTag(
+                sessionId: sessionId,
+                startOffset: match.startOffset,
+                endOffset: match.endOffset,
+                tagType: match.patternName
+            )
+        }
+
+        // Update the unreviewed count
+        unreviewedPIICount = DatabaseManager.shared.getUnreviewedCount(sessionId: sessionId)
+
+        if matches.count > 0 {
+            print("🔒 Found \(matches.count) PII matches in transcript")
         }
     }
 
@@ -194,6 +256,9 @@ struct ContentView: View {
         selectedRecording = recording
         editedTranscript = recording.transcript
         debugLog("🔍 editedTranscript set to: \(editedTranscript.prefix(100))")
+
+        // Scan for PII when loading transcript
+        scanTranscriptForPII(sessionId: recording.id, transcript: recording.transcript)
     }
 
     private func saveTranscript() {
@@ -234,7 +299,23 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Main View (Full Window)
+// MARK: - Main View (Full Window with Tabs)
+
+enum MainTab: String, CaseIterable {
+    case dictate = "DICTATE"
+    case write = "WRITE"
+    case edit = "EDIT"
+    case cards = "CARDS"
+
+    var icon: String {
+        switch self {
+        case .dictate: return "mic.fill"
+        case .write: return "pencil"
+        case .edit: return "textformat"
+        case .cards: return "rectangle.stack"
+        }
+    }
+}
 
 struct MainView: View {
     @ObservedObject var audioRecorder: AudioRecorder
@@ -245,6 +326,7 @@ struct MainView: View {
     @Binding var showPreview: Bool
     @Binding var isFloatingMode: Bool
     @Binding var showSettings: Bool
+    let unreviewedPIICount: Int
     let onStartStop: () -> Void
     let onCancel: () -> Void
     let onSelect: (RecordingItem) -> Void
@@ -253,59 +335,112 @@ struct MainView: View {
     let onDelete: (RecordingItem) -> Void
     let onRetryTranscription: (RecordingItem) -> Void
 
+    @State private var selectedTab: MainTab = .dictate
+
     var body: some View {
         VStack(spacing: 0) {
-            // Top Bar
-            TopBar(showSettings: $showSettings, isFloatingMode: $isFloatingMode)
+            // Minimal top bar - Hemingway style
+            HStack(spacing: 0) {
+                // Settings button (left)
+                Button(action: { showSettings = true }) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 16)
+
+                Spacer()
+
+                // Tab selector (center) - Hemingway Write/Edit style
+                HStack(spacing: 0) {
+                    ForEach(MainTab.allCases, id: \.self) { tab in
+                        Button(action: { selectedTab = tab }) {
+                            Text(tab.rawValue)
+                                .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
+                                .foregroundColor(selectedTab == tab ? .primary : .secondary)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(selectedTab == tab ? Color.accentColor.opacity(0.15) : Color.clear)
+                                .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 8)
+
+                Spacer()
+
+                // Window controls (right)
+                HStack(spacing: 12) {
+                    Button(action: { AppState.shared.windowMode = .medium }) {
+                        Image(systemName: "pip.swap")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Floating Recorder")
+
+                    Button(action: { AppState.shared.windowMode = .micro }) {
+                        Image(systemName: "pip.enter")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Minimize to Pill")
+                }
+                .padding(.trailing, 16)
+            }
+            .background(Color(NSColor.windowBackgroundColor))
 
             Divider()
 
-            // Main content area
-            HSplitView {
-                // Left: History Panel
-                HistoryPanel(
-                    recordings: recordings,
-                    selectedId: selectedRecording?.id,
+            // Tab content
+            switch selectedTab {
+            case .dictate:
+                DictateTabView(
+                    audioRecorder: audioRecorder,
+                    recordingState: $recordingState,
+                    recordings: $recordings,
+                    selectedRecording: $selectedRecording,
+                    editedTranscript: $editedTranscript,
+                    onStartStop: onStartStop,
+                    onCancel: onCancel,
                     onSelect: onSelect,
                     onRefresh: onRefresh,
                     onDelete: onDelete,
                     onRetryTranscription: onRetryTranscription
                 )
-                .frame(minWidth: 280, maxWidth: 350)
 
-                // Right: Editor
-                if let selected = selectedRecording {
-                    EditorView(
-                        recording: selected,
-                        transcript: $editedTranscript,
-                        showPreview: $showPreview,
-                        onSave: onSave
-                    )
-                    .id(selected.id)
-                } else {
-                    EmptyEditorView()
-                }
+            case .write:
+                WriteTabView(
+                    transcript: $editedTranscript,
+                    selectedRecording: selectedRecording,
+                    onSave: onSave
+                )
+
+            case .edit:
+                EditTabView(
+                    transcript: $editedTranscript,
+                    selectedRecording: selectedRecording,
+                    unreviewedPIICount: unreviewedPIICount,
+                    onSave: onSave
+                )
+
+            case .cards:
+                CardsTabView(sessionId: selectedRecording?.id)
             }
-
-            Divider()
-
-            // Bottom: Recorder Module (standalone)
-            RecorderModule(
-                audioRecorder: audioRecorder,
-                recordingState: $recordingState,
-                onRecord: onStartStop,
-                onStop: onStartStop,
-                onCancel: onCancel
-            )
-
-            Divider()
-
-            // Bottom: Playback Module
-            PlaybackModule(selectedRecording: selectedRecording)
         }
-        .frame(minWidth: 1000, minHeight: 700)
+        .frame(minWidth: 900, minHeight: 600)
+        .background(Color(NSColor.windowBackgroundColor))
     }
 }
+
+// Tab views are now in separate module files:
+// - DictateModule.swift (DictateTabView)
+// - WriterModule.swift (WriteTabView)
+// - EditorModule.swift (EditTabView)
+// - CardView.swift (CardsTabView)
 
 // MARK: - Top Bar
 
@@ -341,19 +476,37 @@ struct TopBar: View {
 
             Spacer()
 
-            Text("BrainPhArt")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.secondary)
+            // Logo and title
+            HStack(spacing: 8) {
+                if let iconPath = Bundle.main.resourcePath.map({ $0 + "/AppIcon.icns" }),
+                   let iconImage = NSImage(contentsOfFile: iconPath) {
+                    Image(nsImage: iconImage)
+                        .resizable()
+                        .frame(width: 20, height: 20)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                Text("BrainPhArt")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
 
             Spacer()
 
-            // Float mode button
-            Button(action: { isFloatingMode = true }) {
+            // Medium mode button
+            Button(action: { AppState.shared.windowMode = .medium }) {
+                Image(systemName: "pip.swap")
+                    .font(.system(size: 13))
+            }
+            .buttonStyle(.plain)
+            .help("Floating Recorder")
+
+            // Micro mode button
+            Button(action: { AppState.shared.windowMode = .micro }) {
                 Image(systemName: "pip.enter")
                     .font(.system(size: 13))
             }
             .buttonStyle(.plain)
-            .help("Float Mode")
+            .help("Minimize to Pill")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -692,6 +845,15 @@ struct FloatingRecorderView: View {
 
             // Timer and controls
             HStack(spacing: 12) {
+                // Fish logo
+                if let iconPath = Bundle.main.resourcePath.map({ $0 + "/AppIcon.icns" }),
+                   let iconImage = NSImage(contentsOfFile: iconPath) {
+                    Image(nsImage: iconImage)
+                        .resizable()
+                        .frame(width: 24, height: 24)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+
                 // Record/Stop button
                 Button(action: {
                     // Always allow start/stop regardless of status
@@ -722,6 +884,18 @@ struct FloatingRecorderView: View {
                     Text(formatDuration(audioRecorder.recordingDuration))
                         .font(.system(size: 16, weight: .medium, design: .monospaced))
                         .foregroundColor(.primary)
+
+                    // Cancel button during recording
+                    Button(action: {
+                        onCancel()
+                        transcriptionStatus = .idle
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 18))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel (Esc)")
                 } else if transcriptionStatus == .processing {
                     ProgressView()
                         .scaleEffect(0.6)
@@ -743,7 +917,7 @@ struct FloatingRecorderView: View {
                 Spacer()
 
                 // Always show expand button
-                Button(action: { isFloatingMode = false }) {
+                Button(action: { AppState.shared.windowMode = .full }) {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
@@ -755,6 +929,29 @@ struct FloatingRecorderView: View {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .contextMenu {
+            Button("Minimize") {
+                AppState.shared.windowMode = .micro
+            }
+            Divider()
+            Button("Open History") {
+                AppState.shared.windowMode = .full
+            }
+            Button("Open Settings") {
+                AppState.shared.windowMode = .full
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    NotificationCenter.default.post(name: .openSettings, object: nil)
+                }
+            }
+            Divider()
+            Button("Hide") {
+                NSApp.windows.first { $0 is FloatingPanel }?.orderOut(nil)
+            }
+            Button("Quit BrainPhArt") {
+                NSApp.terminate(nil)
+            }
+        }
         .onChange(of: recordingState) { newState in
             if newState == .recording {
                 transcriptionStatus = .recording
@@ -794,11 +991,13 @@ struct FloatingRecorderView: View {
                 simulatePaste()
             }
 
-            // Auto-hide after 3 seconds
+            // Auto-hide panel after 3 seconds (not the whole app)
             hideTimer?.invalidate()
             hideTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { _ in
                 Task { @MainActor in
-                    NSApp.hide(nil)
+                    if let delegate = NSApp.delegate as? AppDelegate {
+                        delegate.floatingPanel?.orderOut(nil)
+                    }
                 }
             }
         }
@@ -808,6 +1007,207 @@ struct FloatingRecorderView: View {
         let mins = Int(seconds) / 60
         let secs = Int(seconds) % 60
         return String(format: "%02d:%02d", mins, secs)
+    }
+}
+
+// MARK: - Ultra Compact Recorder (Waveform only, hover to expand)
+
+struct UltraCompactRecorderView: View {
+    @ObservedObject var audioRecorder: AudioRecorder
+    @Binding var recordingState: RecordingState
+    @EnvironmentObject var appState: AppState
+    let onStartStop: () -> Void
+    let onCancel: () -> Void
+
+    @State private var isHovering = false
+    @State private var transcriptionStatus: TranscriptionStatus = .idle
+    @State private var lastSessionId: String = ""
+
+    let transcriptCheckTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        HStack(spacing: 6) {
+            // Fish logo
+            if let iconPath = Bundle.main.resourcePath.map({ $0 + "/AppIcon.icns" }),
+               let iconImage = NSImage(contentsOfFile: iconPath) {
+                Image(nsImage: iconImage)
+                    .resizable()
+                    .frame(width: 20, height: 20)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .padding(.leading, 6)
+            }
+
+            // Red dot indicator when recording
+            if recordingState == .recording {
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 6, height: 6)
+            }
+
+            // Main tap area - mini waveform
+            Button(action: onStartStop) {
+                ZStack {
+                    MiniWaveform(audioRecorder: audioRecorder, isRecording: recordingState == .recording)
+                        .frame(height: 28)
+
+                    // Status overlay
+                    if transcriptionStatus == .processing {
+                        ProgressView()
+                            .scaleEffect(0.4)
+                    } else if transcriptionStatus == .complete {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.system(size: 14))
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+
+            // Close button (Esc)
+            Button(action: closeOrCancel) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 8)
+            .help("Close (Esc)")
+        }
+        .frame(height: 40)
+        .background(Color(NSColor.windowBackgroundColor))
+        .clipShape(Capsule())
+        .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
+        .contextMenu {
+            Button("Expand Window") {
+                appState.windowMode = .medium
+            }
+            Divider()
+            Button("Open History") {
+                appState.windowMode = .full
+            }
+            Button("Open Settings") {
+                appState.windowMode = .full
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    NotificationCenter.default.post(name: .openSettings, object: nil)
+                }
+            }
+            Divider()
+            Button("Hide") {
+                hidePanel()
+            }
+            Button("Quit BrainPhArt") {
+                NSApp.terminate(nil)
+            }
+        }
+        .onChange(of: recordingState) { newState in
+            if newState == .recording {
+                transcriptionStatus = .recording
+            } else if transcriptionStatus == .recording {
+                transcriptionStatus = .processing
+                if let latest = DatabaseManager.shared.getAllSessions().first {
+                    lastSessionId = latest.id
+                }
+            }
+        }
+        .onReceive(transcriptCheckTimer) { _ in
+            checkTranscription()
+        }
+    }
+
+    private func checkTranscription() {
+        guard transcriptionStatus == .processing, !lastSessionId.isEmpty else { return }
+        let transcript = DatabaseManager.shared.getTranscript(sessionId: lastSessionId)
+        if !transcript.isEmpty {
+            transcriptionStatus = .complete
+            print("✅ Got transcript, copying and pasting...")
+
+            // Copy to clipboard
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(transcript, forType: .string)
+            print("📋 Copied: \(transcript.prefix(30))...")
+
+            // Auto-paste after brief delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                simulatePaste()
+                print("⌨️ Paste triggered")
+            }
+
+            // Auto-hide after 2 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                hidePanel()
+                transcriptionStatus = .idle
+                lastSessionId = ""
+            }
+        }
+    }
+
+    private func closeOrCancel() {
+        if recordingState == .recording {
+            onCancel()
+            transcriptionStatus = .idle
+        } else {
+            hidePanel()
+        }
+    }
+
+    private func hidePanel() {
+        NSApp.windows.first { $0 is FloatingPanel }?.orderOut(nil)
+    }
+}
+
+// MARK: - Mini Waveform (half the bars for compact pill)
+
+struct MiniWaveform: View {
+    @ObservedObject var audioRecorder: AudioRecorder
+    let isRecording: Bool
+
+    private let barCount = 20  // Half of original
+    @State private var bandLevels: [Float] = Array(repeating: 0, count: 20)
+
+    let timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        GeometryReader { geo in
+            HStack(alignment: .center, spacing: 2) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(isRecording ? Color.white.opacity(0.9) : Color.white.opacity(0.15))
+                        .frame(width: 2, height: max(2, CGFloat(bandLevels[index]) * geo.size.height * 0.9))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+        .onReceive(timer) { _ in
+            if isRecording {
+                let baseLevel = audioRecorder.audioLevel
+                for i in 0..<barCount {
+                    let centerDistance = abs(Float(i) - Float(barCount) / 2.0) / Float(barCount)
+                    let voiceBoost = 1.0 - (centerDistance * 0.2)
+                    let variation = Float.random(in: 0.25...1.9)
+                    let spike: Float = Float.random(in: 0...1) < 0.15 ? Float.random(in: 1.3...1.9) : 1.0
+                    let jitter = Float.random(in: -0.12...0.12)
+                    let targetLevel = baseLevel * voiceBoost * variation * spike + jitter
+                    let smoothing: Float = 0.6
+                    bandLevels[i] = bandLevels[i] * (1 - smoothing) + targetLevel * smoothing
+                    if baseLevel > 0.01 {
+                        bandLevels[i] = max(0.08, bandLevels[i])
+                    }
+                }
+            }
+        }
+        .onChange(of: isRecording) { recording in
+            if !recording {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    bandLevels = Array(repeating: 0, count: barCount)
+                }
+            }
+        }
     }
 }
 
@@ -1023,9 +1423,12 @@ struct EditorView: View {
     let recording: RecordingItem
     @Binding var transcript: String
     @Binding var showPreview: Bool
+    let unreviewedPIICount: Int
+    let isRecording: Bool
     let onSave: () -> Void
 
     @State private var showCopied = false
+    @State private var versionNumber: Int = 1
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1033,6 +1436,19 @@ struct EditorView: View {
             HStack {
                 Text(recording.dateString)
                     .font(.headline)
+
+                // Privacy Gate button - transparent user control
+                PrivacyGateButton(
+                    unreviewedCount: unreviewedPIICount,
+                    sessionId: recording.id
+                )
+
+                // Extract Cards button
+                ExtractCardsButton(
+                    sessionId: recording.id,
+                    transcript: transcript
+                )
+
                 Spacer()
 
                 // Copy to clipboard
@@ -1067,7 +1483,25 @@ struct EditorView: View {
                 .font(.system(size: 16, weight: .regular, design: .default))
                 .padding(16)
                 .id(recording.id)
+
+            // Stats bar at bottom
+            StatsBar(
+                wordCount: wordCount(transcript),
+                versionNumber: versionNumber,
+                unreviewedCount: unreviewedPIICount,
+                isRecording: isRecording
+            )
         }
+        .onAppear {
+            versionNumber = DatabaseManager.shared.getLatestVersion(sessionId: recording.id)?.versionNum ?? 1
+        }
+        .onChange(of: transcript) { _ in
+            versionNumber = DatabaseManager.shared.getLatestVersion(sessionId: recording.id)?.versionNum ?? 1
+        }
+    }
+
+    private func wordCount(_ text: String) -> Int {
+        text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
     }
 
     private func copyToClipboard() {
@@ -1220,4 +1654,5 @@ struct Recording: Identifiable {
     let completedAt: Int?
     let status: String
     let chunkCount: Int
+    let privacyLevel: String
 }

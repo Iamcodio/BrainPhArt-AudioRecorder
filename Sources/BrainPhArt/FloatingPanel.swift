@@ -10,21 +10,26 @@ import Cocoa
 
 class FloatingPanel: NSPanel {
 
+    var showsTitleBar: Bool = false
+
     // MARK: - Initialization
 
     init(
         contentRect: NSRect,
         backing: NSWindow.BackingStoreType = .buffered,
-        defer flag: Bool = false
+        defer flag: Bool = false,
+        showsTitleBar: Bool = false
     ) {
+        self.showsTitleBar = showsTitleBar
+
+        // Use different style mask based on whether we show title bar
+        let styleMask: NSWindow.StyleMask = showsTitleBar
+            ? [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            : [.nonactivatingPanel, .borderless, .fullSizeContentView]
+
         super.init(
             contentRect: contentRect,
-            styleMask: [
-                .nonactivatingPanel,  // Doesn't steal focus from other apps
-                .titled,              // Has a title bar
-                .closable,            // Has close button
-                .fullSizeContentView  // Content extends under title bar
-            ],
+            styleMask: styleMask,
             backing: backing,
             defer: flag
         )
@@ -56,10 +61,30 @@ class FloatingPanel: NSPanel {
     }
 
     private func configureAppearance() {
-        self.titleVisibility = .hidden
-        self.titlebarAppearsTransparent = true
-        self.backgroundColor = NSColor.windowBackgroundColor
-        self.isOpaque = false
+        if showsTitleBar {
+            // Full window mode - show title bar with traffic lights
+            self.titleVisibility = .hidden
+            self.titlebarAppearsTransparent = true
+            self.backgroundColor = NSColor.windowBackgroundColor
+            self.isOpaque = true
+            self.minSize = NSSize(width: 800, height: 500)  // Minimum size
+
+            // Allow standard window behavior
+            self.contentView?.wantsLayer = true
+            self.contentView?.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        } else {
+            // Floating mode - borderless, clean look
+            self.titleVisibility = .hidden
+            self.titlebarAppearsTransparent = true
+            self.backgroundColor = .clear
+            self.isOpaque = false
+
+            // Rounded corners for clean look
+            self.contentView?.wantsLayer = true
+            self.contentView?.layer?.cornerRadius = 12
+            self.contentView?.layer?.masksToBounds = true
+            self.contentView?.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
     }
 
     // MARK: - Behavior Overrides
