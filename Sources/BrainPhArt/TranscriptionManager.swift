@@ -7,8 +7,32 @@ actor TranscriptionManager {
 
     private var whisper: Whisper?
     private var isLoading = false
+    private var customVocabulary: [String] = []
 
     private init() {}
+
+    /// Load custom vocabulary from database for improved recognition
+    func loadCustomVocabulary() {
+        // Load from custom_dictionary table
+        customVocabulary = DatabaseManager.shared.getCustomDictionaryWords()
+        print("📚 Loaded \(customVocabulary.count) custom vocabulary words")
+    }
+
+    /// Build initial prompt with vocabulary hints for Whisper
+    private func buildInitialPrompt() -> String {
+        // Include custom words to help Whisper recognize specialized terms
+        // Format: comma-separated list of words/phrases
+        let vocabHints = customVocabulary.prefix(50).joined(separator: ", ")
+
+        // Base prompt for better transcription quality
+        let basePrompt = "Transcribe accurately. Preserve original words and terminology."
+
+        if vocabHints.isEmpty {
+            return basePrompt
+        } else {
+            return "\(basePrompt) Key terms: \(vocabHints)"
+        }
+    }
 
     func loadModel() async throws {
         guard whisper == nil, !isLoading else { return }
@@ -23,9 +47,18 @@ actor TranscriptionManager {
         }
 
         print("🔄 Loading whisper model...")
-        whisper = Whisper(fromFileURL: modelPath)
+
+        // Create params with better quality settings
+        let params = WhisperParams(strategy: .beamSearch)
+        params.language = .english  // Set explicit language for better accuracy
+
+        whisper = Whisper(fromFileURL: modelPath, withParams: params)
+
+        // Load custom vocabulary
+        loadCustomVocabulary()
+
         isLoading = false
-        print("✅ Whisper model loaded")
+        print("✅ Whisper model loaded with custom vocabulary")
     }
 
     func transcribe(audioURL: URL) async throws -> String {
@@ -40,7 +73,14 @@ actor TranscriptionManager {
         // Read and resample audio to 16kHz
         let audioFrames = try await resampleTo16kHz(audioURL)
 
-        print("🎤 Transcribing \(audioFrames.count) samples...")
+        print("🎤 Transcribing \(audioFrames.count) samples with vocab hints...")
+
+        // Set initial prompt with vocabulary hints
+        // Note: We need to keep the prompt alive during transcription
+        let prompt = buildInitialPrompt()
+        let promptPointer = strdup(prompt)
+        defer { free(promptPointer) }
+        whisper.params.initial_prompt = UnsafePointer(promptPointer)
 
         let segments = try await whisper.transcribe(audioFrames: audioFrames)
 
@@ -49,6 +89,20 @@ actor TranscriptionManager {
         print("📝 Transcribed: \(transcript.prefix(50))...")
 
         return transcript
+    }
+
+    /// Add word to custom vocabulary (for better future recognition)
+    func addToVocabulary(_ word: String) {
+        if !customVocabulary.contains(word.lowercased()) {
+            customVocabulary.append(word.lowercased())
+            DatabaseManager.shared.addCustomWord(word)
+            print("📚 Added '\(word)' to vocabulary")
+        }
+    }
+
+    /// Reload vocabulary (call after adding words)
+    func reloadVocabulary() {
+        loadCustomVocabulary()
     }
 
     private func resampleTo16kHz(_ sourceURL: URL) async throws -> [Float] {

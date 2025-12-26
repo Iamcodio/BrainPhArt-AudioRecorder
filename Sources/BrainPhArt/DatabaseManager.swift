@@ -954,4 +954,155 @@ final class DatabaseManager {
 
         return sessions
     }
+
+    // MARK: - Custom Dictionary (Vocabulary for Transcription)
+
+    func addCustomWord(_ word: String) {
+        let id = UUID().uuidString
+        let now = Int(Date().timeIntervalSince1970)
+        let lowercased = word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !lowercased.isEmpty else { return }
+
+        let sql = "INSERT OR IGNORE INTO custom_dictionary (id, word, added_at) VALUES (?, ?, ?)"
+
+        do {
+            try db.run(sql, id, lowercased, now)
+            print("📚 Added '\(lowercased)' to custom dictionary")
+        } catch {
+            print("❌ Failed to add custom word: \(error)")
+        }
+    }
+
+    func getCustomDictionaryWords() -> [String] {
+        let sql = "SELECT word FROM custom_dictionary ORDER BY added_at DESC"
+
+        var words: [String] = []
+
+        do {
+            let stmt = try db.prepare(sql)
+            for row in stmt {
+                if let word = row[0] as? String {
+                    words.append(word)
+                }
+            }
+        } catch {
+            print("❌ Failed to load custom dictionary: \(error)")
+        }
+
+        return words
+    }
+
+    func removeCustomWord(_ word: String) {
+        let lowercased = word.lowercased()
+        let sql = "DELETE FROM custom_dictionary WHERE word = ?"
+
+        do {
+            try db.run(sql, lowercased)
+            print("📚 Removed '\(lowercased)' from custom dictionary")
+        } catch {
+            print("❌ Failed to remove custom word: \(error)")
+        }
+    }
+
+    func isCustomWord(_ word: String) -> Bool {
+        let lowercased = word.lowercased()
+        let sql = "SELECT COUNT(*) FROM custom_dictionary WHERE word = ?"
+
+        do {
+            let stmt = try db.prepare(sql, lowercased)
+            if let row = stmt.makeIterator().next() {
+                return (row[0] as? Int64 ?? 0) > 0
+            }
+        } catch {
+            print("❌ Failed to check custom word: \(error)")
+        }
+
+        return false
+    }
+
+    // MARK: - Transcript File Saving
+
+    /// Base path for transcripts: ~/brainphart/transcripts/
+    private var transcriptsBasePath: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("brainphart/transcripts")
+    }
+
+    /// Get dated folder path: ~/brainphart/transcripts/2025/12/26/
+    private func datedFolderPath(for date: Date = Date()) -> URL {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy/MM/dd"
+        let datePath = formatter.string(from: date)
+        return transcriptsBasePath.appendingPathComponent(datePath)
+    }
+
+    /// Save RAW transcript (from Whisper, unedited)
+    func saveRawTranscriptFile(sessionId: String, content: String, date: Date = Date()) -> URL? {
+        let folder = datedFolderPath(for: date)
+
+        // Create folder if needed
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        // Filename: RAW_HH-MM-SS_sessionId.txt
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateFormat = "HH-mm-ss"
+        let timeStr = timeFormatter.string(from: date)
+
+        let shortId = String(sessionId.prefix(8))
+        let filename = "RAW_\(timeStr)_\(shortId).txt"
+        let filePath = folder.appendingPathComponent(filename)
+
+        do {
+            try content.write(to: filePath, atomically: true, encoding: .utf8)
+            print("📄 Saved RAW transcript: \(filePath.path)")
+            return filePath
+        } catch {
+            print("❌ Failed to save RAW transcript: \(error)")
+            return nil
+        }
+    }
+
+    /// Save CLEANUP transcript (after LLM/manual edits)
+    func saveCleanupTranscriptFile(sessionId: String, content: String, date: Date = Date()) -> URL? {
+        let folder = datedFolderPath(for: date)
+
+        // Create folder if needed
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        // Filename: CLEANUP_HH-MM-SS_sessionId.txt
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateFormat = "HH-mm-ss"
+        let timeStr = timeFormatter.string(from: date)
+
+        let shortId = String(sessionId.prefix(8))
+        let filename = "CLEANUP_\(timeStr)_\(shortId).txt"
+        let filePath = folder.appendingPathComponent(filename)
+
+        do {
+            try content.write(to: filePath, atomically: true, encoding: .utf8)
+            print("📄 Saved CLEANUP transcript: \(filePath.path)")
+            return filePath
+        } catch {
+            print("❌ Failed to save CLEANUP transcript: \(error)")
+            return nil
+        }
+    }
+
+    /// Get session creation date
+    func getSessionDate(sessionId: String) -> Date {
+        let sql = "SELECT created_at FROM sessions WHERE id = ?"
+
+        do {
+            for row in try db.prepare(sql, sessionId) {
+                if let timestamp = row[0] as? Int64 {
+                    return Date(timeIntervalSince1970: TimeInterval(timestamp))
+                }
+            }
+        } catch {
+            print("❌ Failed to get session date: \(error)")
+        }
+
+        return Date()
+    }
 }

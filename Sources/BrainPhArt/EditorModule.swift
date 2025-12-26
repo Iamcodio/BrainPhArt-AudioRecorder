@@ -150,22 +150,25 @@ struct EditTabView: View {
 
                 Divider()
 
-                // Editor - using simple TextEditor for now
-                ZStack(alignment: .topLeading) {
-                    Color(NSColor.textBackgroundColor)
-
-                    if transcript.isEmpty {
-                        Text("Select a recording in DICTATE tab, or start typing here...")
+                // Editor with inline spell check (subtle purple underlines)
+                // Only show NSTextView when text exists (fixes binding timing issue)
+                if transcript.isEmpty {
+                    VStack {
+                        Spacer()
+                        Text("Select a recording to edit")
                             .foregroundColor(.secondary)
-                            .padding(20)
+                        Spacer()
                     }
-
-                    TextEditor(text: $transcript)
-                        .font(.system(size: 16))
-                        .scrollContentBackground(.hidden)
-                        .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(NSColor.textBackgroundColor))
+                } else {
+                    InlineSpellTextView(
+                        text: $transcript,
+                        isSpellCheckEnabled: true,
+                        onSave: onSave
+                    )
+                    .id(selectedRecording?.id ?? "editor")
                 }
-                .id(selectedRecording?.id ?? "editor")
             }
             .frame(minWidth: 500)
 

@@ -17,8 +17,19 @@ actor SpellEngine {
     /// Track if dictionary has been loaded
     private var isLoaded = false
 
+    /// Current language setting
+    private var currentLanguage: String = "en-GB"
+
     private init() {
         db = Self.setupDatabase()
+    }
+
+    /// Reload dictionary with specified language
+    func reloadDictionary(language: String) async {
+        currentLanguage = language
+        isLoaded = false
+        await loadDictionary()
+        print("[SpellEngine] Reloaded dictionary for \(language)")
     }
 
     // MARK: - Database Setup
@@ -45,6 +56,11 @@ actor SpellEngine {
         guard let db = db else {
             print("[SpellEngine] No database connection")
             return
+        }
+
+        // Get language from UserDefaults if not set
+        if currentLanguage.isEmpty {
+            currentLanguage = UserDefaults.standard.string(forKey: "spellCheckLanguage") ?? "en-GB"
         }
 
         wordSet.removeAll()
@@ -75,9 +91,213 @@ actor SpellEngine {
             print("[SpellEngine] Failed to load custom dictionary: \(error)")
         }
 
+        // Add language-specific spellings
+        if currentLanguage == "en-GB" {
+            // British spellings
+            for word in britishSpellings {
+                wordSet.insert(word)
+            }
+            // Remove American-only spellings
+            for word in americanOnlySpellings {
+                wordSet.remove(word)
+            }
+        } else {
+            // American spellings
+            for word in americanSpellings {
+                wordSet.insert(word)
+            }
+            // Remove British-only spellings
+            for word in britishOnlySpellings {
+                wordSet.remove(word)
+            }
+        }
+
         isLoaded = true
-        print("[SpellEngine] Loaded \(wordSet.count) words into dictionary")
+        print("[SpellEngine] Loaded \(wordSet.count) words into dictionary (\(currentLanguage))")
     }
+
+    // MARK: - British vs American Spellings
+
+    /// British spellings to add when en-GB is selected
+    private let britishSpellings: Set<String> = [
+        // -our endings
+        "colour", "colours", "coloured", "colouring", "colourful",
+        "favour", "favours", "favoured", "favouring", "favourite", "favourites",
+        "honour", "honours", "honoured", "honouring", "honourable",
+        "labour", "labours", "laboured", "labouring",
+        "neighbour", "neighbours", "neighbouring", "neighbourhood",
+        "behaviour", "behaviours", "behavioural",
+        "humour", "humours", "humoured", "humouring", "humorous",
+        "flavour", "flavours", "flavoured", "flavouring",
+        "vapour", "vapours",
+        "odour", "odours",
+        "rumour", "rumours", "rumoured",
+        "savour", "savours", "savoured", "savouring", "savoury",
+        "vigour", "vigorous",
+        // -ise endings
+        "organise", "organises", "organised", "organising", "organisation", "organisations",
+        "realise", "realises", "realised", "realising",
+        "recognise", "recognises", "recognised", "recognising",
+        "specialise", "specialises", "specialised", "specialising",
+        "apologise", "apologises", "apologised", "apologising",
+        "criticise", "criticises", "criticised", "criticising",
+        "emphasise", "emphasises", "emphasised", "emphasising",
+        "summarise", "summarises", "summarised", "summarising",
+        "analyse", "analyses", "analysed", "analysing",
+        "paralyse", "paralyses", "paralysed", "paralysing",
+        "catalyse", "catalyses", "catalysed", "catalysing",
+        // -re endings
+        "centre", "centres", "centred", "centring",
+        "theatre", "theatres",
+        "metre", "metres",
+        "litre", "litres",
+        "fibre", "fibres",
+        "spectre", "spectres",
+        "sombre",
+        "calibre",
+        // -ce/-se differences
+        "defence", "defences",
+        "offence", "offences",
+        "licence", "licences",
+        "practise", "practises", "practised", "practising",
+        // -ogue endings
+        "catalogue", "catalogues", "catalogued", "cataloguing",
+        "dialogue", "dialogues",
+        "monologue", "monologues",
+        "prologue", "prologues",
+        "epilogue", "epilogues",
+        // Double consonants
+        "travelling", "travelled", "traveller", "travellers",
+        "cancelled", "cancelling", "cancellation",
+        "labelled", "labelling",
+        "modelled", "modelling",
+        "counselled", "counselling", "counsellor", "counsellors",
+        "marvelled", "marvelling", "marvellous",
+        "jewellery",
+        "fulfil", "fulfils", "fulfilled", "fulfilling", "fulfilment",
+        "skilful", "wilful",
+        // Other British
+        "grey", "greys",
+        "cheque", "cheques",
+        "kerb", "kerbs",
+        "tyre", "tyres",
+        "aluminium",
+        "mum", "mums",
+        "whilst",
+        "amongst",
+        "towards",
+        "backwards", "forwards", "afterwards", "upwards", "downwards",
+        "programme", "programmes", "programmed", "programming",
+        "aeroplane", "aeroplanes",
+        "pyjamas",
+        "draught", "draughts", "draughty",
+        "plough", "ploughs", "ploughed", "ploughing",
+        "gaol", "gaols",
+        "storey", "storeys",
+        "connexion",
+        "enquiry", "enquiries", "enquire", "enquires", "enquired", "enquiring",
+    ]
+
+    /// American spellings to add when en-US is selected
+    private let americanSpellings: Set<String> = [
+        "color", "colors", "colored", "coloring", "colorful",
+        "favor", "favors", "favored", "favoring", "favorite", "favorites",
+        "honor", "honors", "honored", "honoring", "honorable",
+        "labor", "labors", "labored", "laboring",
+        "neighbor", "neighbors", "neighboring", "neighborhood",
+        "behavior", "behaviors", "behavioral",
+        "humor", "humors", "humored", "humoring",
+        "flavor", "flavors", "flavored", "flavoring",
+        "vapor", "vapors",
+        "odor", "odors",
+        "rumor", "rumors", "rumored",
+        "savor", "savors", "savored", "savoring", "savory",
+        "vigor",
+        "organize", "organizes", "organized", "organizing", "organization", "organizations",
+        "realize", "realizes", "realized", "realizing",
+        "recognize", "recognizes", "recognized", "recognizing",
+        "specialize", "specializes", "specialized", "specializing",
+        "apologize", "apologizes", "apologized", "apologizing",
+        "criticize", "criticizes", "criticized", "criticizing",
+        "emphasize", "emphasizes", "emphasized", "emphasizing",
+        "summarize", "summarizes", "summarized", "summarizing",
+        "analyze", "analyzes", "analyzed", "analyzing",
+        "paralyze", "paralyzes", "paralyzed", "paralyzing",
+        "catalyze", "catalyzes", "catalyzed", "catalyzing",
+        "center", "centers", "centered", "centering",
+        "theater", "theaters",
+        "meter", "meters",
+        "liter", "liters",
+        "fiber", "fibers",
+        "specter", "specters",
+        "somber",
+        "caliber",
+        "defense", "defenses",
+        "offense", "offenses",
+        "license", "licenses", "licensed", "licensing",
+        "practice", "practices", "practiced", "practicing",
+        "catalog", "catalogs", "cataloged", "cataloging",
+        "dialog", "dialogs",
+        "monolog", "monologs",
+        "prolog", "prologs",
+        "epilog", "epilogs",
+        "traveling", "traveled", "traveler", "travelers",
+        "canceled", "canceling", "cancelation",
+        "labeled", "labeling",
+        "modeled", "modeling",
+        "counseled", "counseling", "counselor", "counselors",
+        "marveled", "marveling", "marvelous",
+        "jewelry",
+        "fulfill", "fulfills", "fulfilled", "fulfilling", "fulfillment",
+        "skillful", "willful",
+        "gray", "grays",
+        "check", "checks",
+        "curb", "curbs",
+        "tire", "tires",
+        "aluminum",
+        "mom", "moms",
+        "while",
+        "among",
+        "toward",
+        "backward", "forward", "afterward", "upward", "downward",
+        "program", "programs", "programmed", "programming",
+        "airplane", "airplanes",
+        "pajamas",
+        "draft", "drafts", "drafty",
+        "plow", "plows", "plowed", "plowing",
+        "jail", "jails",
+        "story", "stories",
+        "connection",
+        "inquiry", "inquiries", "inquire", "inquires", "inquired", "inquiring",
+    ]
+
+    /// American-only spellings to remove when British is selected
+    private let americanOnlySpellings: Set<String> = [
+        "color", "colors", "colored", "coloring", "colorful",
+        "favor", "favors", "favored", "favoring", "favorite", "favorites",
+        "honor", "honors", "honored", "honoring", "honorable",
+        "gray", "grays",
+        "tire", "tires",
+        "aluminum",
+        "mom", "moms",
+        "airplane", "airplanes",
+        "jail", "jails",
+        "pajamas",
+    ]
+
+    /// British-only spellings to remove when American is selected
+    private let britishOnlySpellings: Set<String> = [
+        "colour", "colours", "coloured", "colouring", "colourful",
+        "favour", "favours", "favoured", "favouring", "favourite", "favourites",
+        "honour", "honours", "honoured", "honouring", "honourable",
+        "grey", "greys",
+        "tyre", "tyres",
+        "aluminium",
+        "mum", "mums",
+        "aeroplane", "aeroplanes",
+        "gaol", "gaols",
+        "pyjamas",
+    ]
 
     /// Check if a word is spelled correctly.
     /// - Parameter word: The word to check

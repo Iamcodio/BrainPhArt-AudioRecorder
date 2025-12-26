@@ -86,6 +86,28 @@ struct ContentView: View {
         .onReceive(openSettingsPublisher) { _ in
             showSettings = true
         }
+        // Refresh when transcription completes
+        .onReceive(NotificationCenter.default.publisher(for: .transcriptionComplete)) { notification in
+            if let sessionId = notification.object as? String {
+                print("📝 Transcription complete notification for: \(sessionId)")
+                loadRecordings()
+                if selectedRecording?.id == sessionId {
+                    let transcript = DatabaseManager.shared.getTranscript(sessionId: sessionId)
+                    editedTranscript = transcript
+                }
+            }
+        }
+        // Refresh when transcript is saved/edited
+        .onReceive(NotificationCenter.default.publisher(for: .transcriptSaved)) { notification in
+            if let sessionId = notification.object as? String {
+                print("💾 Transcript saved notification for: \(sessionId)")
+                loadRecordings()
+                if selectedRecording?.id == sessionId {
+                    let transcript = DatabaseManager.shared.getTranscript(sessionId: sessionId)
+                    editedTranscript = transcript
+                }
+            }
+        }
     }
 
     private func refreshSelectedTranscript() {
@@ -117,9 +139,18 @@ struct ContentView: View {
                 NSPasteboard.general.setString(latestTranscript, forType: .string)
                 print("📋 Auto-copied to clipboard!")
 
-                // Auto-paste into focused text field (after small delay for clipboard)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    simulatePaste()
+                // Only auto-paste if we're in floating mode (dictation mode)
+                // In full mode, user is viewing history and doesn't need auto-paste
+                if appState.windowMode != .full {
+                    // Restore focus to original app, then paste
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        AppState.shared.restoreFocus()
+
+                        // Longer delay (0.3s) to allow focus to settle, especially for internal chat
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            simulatePaste()
+                        }
+                    }
                 }
 
                 // Scan for PII after transcription completes
@@ -288,13 +319,21 @@ struct ContentView: View {
     }
 
     private func handleRetryTranscription(_ recording: RecordingItem) {
+        print("🔄 Retrying transcription for session: \(recording.id)")
+
+        // Reset status to pending
         DatabaseManager.shared.resetTranscriptionStatus(sessionId: recording.id)
         loadRecordings()
 
-        // Update selection if this is the selected recording
+        // Update selection - clear transcript while processing
         if let updated = recordings.first(where: { $0.id == recording.id }) {
             selectedRecording = updated
-            editedTranscript = updated.transcript
+            editedTranscript = ""  // Clear while re-processing
+        }
+
+        // Trigger immediate processing
+        Task {
+            await TranscriptionWorker.shared.processNow()
         }
     }
 }
@@ -306,6 +345,7 @@ enum MainTab: String, CaseIterable {
     case write = "WRITE"
     case edit = "EDIT"
     case cards = "CARDS"
+    case chat = "CHAT"
 
     var icon: String {
         switch self {
@@ -313,6 +353,7 @@ enum MainTab: String, CaseIterable {
         case .write: return "pencil"
         case .edit: return "textformat"
         case .cards: return "rectangle.stack"
+        case .chat: return "bubble.left.and.bubble.right"
         }
     }
 }
@@ -429,6 +470,9 @@ struct MainView: View {
 
             case .cards:
                 CardsTabView(sessionId: selectedRecording?.id)
+
+            case .chat:
+                ChatTabView()
             }
         }
         .frame(minWidth: 900, minHeight: 600)
@@ -986,18 +1030,27 @@ struct FloatingRecorderView: View {
             NSPasteboard.general.setString(transcript, forType: .string)
             print("📋 Copied to clipboard!")
 
-            // Auto-paste after brief delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                simulatePaste()
+            // Hide the floating panel first
+            if let delegate = NSApp.delegate as? AppDelegate {
+                delegate.floatingPanel?.orderOut(nil)
             }
 
-            // Auto-hide panel after 3 seconds (not the whole app)
+            // Restore focus to original app, then paste
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                AppState.shared.restoreFocus()
+
+                // Longer delay (0.3s) to allow focus to settle, especially for internal chat
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    simulatePaste()
+                }
+            }
+
+            // Reset state after a delay
             hideTimer?.invalidate()
-            hideTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { _ in
+            hideTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
                 Task { @MainActor in
-                    if let delegate = NSApp.delegate as? AppDelegate {
-                        delegate.floatingPanel?.orderOut(nil)
-                    }
+                    self.transcriptionStatus = .idle
+                    self.lastSessionId = ""
                 }
             }
         }
@@ -1132,15 +1185,22 @@ struct UltraCompactRecorderView: View {
             NSPasteboard.general.setString(transcript, forType: .string)
             print("📋 Copied: \(transcript.prefix(30))...")
 
-            // Auto-paste after brief delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                simulatePaste()
-                print("⌨️ Paste triggered")
+            // Hide panel first
+            hidePanel()
+
+            // Restore focus to original app, then paste
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                AppState.shared.restoreFocus()
+
+                // Longer delay (0.3s) to allow focus to settle, especially for internal chat
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    simulatePaste()
+                    print("⌨️ Paste triggered")
+                }
             }
 
-            // Auto-hide after 2 seconds
+            // Reset state after delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                hidePanel()
                 transcriptionStatus = .idle
                 lastSessionId = ""
             }

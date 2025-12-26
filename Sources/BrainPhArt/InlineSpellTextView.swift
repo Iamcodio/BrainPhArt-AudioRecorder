@@ -11,42 +11,53 @@ struct InlineSpellTextView: NSViewRepresentable {
     var onSave: (() -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
+        // Proper NSTextView setup with text system components
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+
+        let textContainer = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = true
+        layoutManager.addTextContainer(textContainer)
+
+        let textView = SpellCheckTextView(frame: .zero, textContainer: textContainer)
+        textView.delegate = context.coordinator
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.font = NSFont.systemFont(ofSize: 16)
+        textView.textColor = NSColor.textColor
+        textView.backgroundColor = NSColor.textBackgroundColor
+        textView.textContainerInset = NSSize(width: 16, height: 16)
+        textView.insertionPointColor = NSColor.textColor
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+
+        // Disable Apple's spell check - we use custom SpellEngine
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
-
-        let textView = SpellCheckTextView()
-        textView.delegate = context.coordinator
-        textView.isRichText = false
-        textView.allowsUndo = true
-        textView.font = NSFont.systemFont(ofSize: 16)
-        textView.textColor = NSColor.textColor  // Explicit text color
-        textView.textContainerInset = NSSize(width: 16, height: 16)
-        textView.isAutomaticSpellingCorrectionEnabled = false  // We do our own
-        textView.isContinuousSpellCheckingEnabled = false  // We do our own
-        textView.isGrammarCheckingEnabled = false  // We do our own
-        textView.backgroundColor = NSColor.textBackgroundColor
-        textView.insertionPointColor = NSColor.textColor  // Cursor color
-
-        // Set up text container
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.textContainer?.widthTracksTextView = true
-
         scrollView.documentView = textView
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = NSColor.textBackgroundColor
 
         // Store reference for coordinator
         context.coordinator.textView = textView
         context.coordinator.isSpellCheckEnabled = isSpellCheckEnabled
 
-        // Set initial text
+        // Set initial text and track it to prevent re-entrancy issues
         textView.string = text
+        context.coordinator.lastSentText = text
 
-        // Run initial spell check
-        if isSpellCheckEnabled && !text.isEmpty {
+        // Run custom spell check
+        if isSpellCheckEnabled {
             context.coordinator.scheduleSpellCheck()
         }
 
@@ -56,16 +67,25 @@ struct InlineSpellTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? SpellCheckTextView else { return }
 
-        // Update spell check state
         context.coordinator.isSpellCheckEnabled = isSpellCheckEnabled
 
-        // Only update text if it changed externally
-        if textView.string != text && !context.coordinator.isEditing {
-            let selectedRange = textView.selectedRange()
-            textView.string = text
-            textView.setSelectedRange(selectedRange)
+        // Only sync text from binding to NSTextView when:
+        // 1. The text in NSTextView differs from the binding
+        // 2. AND the binding text is NOT just an echo of what we sent (prevents re-entrancy)
+        // 3. AND we're not actively editing
+        //
+        // This ensures external changes (e.g., loading a new recording) update the view,
+        // but our own edits don't cause the view to be reset.
+        let bindingText = text
+        let viewText = textView.string
 
-            // Run spell check after text update
+        if viewText != bindingText &&
+           bindingText != context.coordinator.lastSentText &&
+           !context.coordinator.isEditing {
+            // This is a genuine external update - sync it
+            context.coordinator.lastSentText = bindingText
+            textView.string = bindingText
+            // Re-run spell check after text update
             if isSpellCheckEnabled {
                 context.coordinator.scheduleSpellCheck()
             }
@@ -82,6 +102,8 @@ struct InlineSpellTextView: NSViewRepresentable {
         var isEditing = false
         var isSpellCheckEnabled = true
         private var spellCheckTask: Task<Void, Never>?
+        /// Track the last text we sent to the binding to prevent re-entrancy
+        var lastSentText: String = ""
 
         init(_ parent: InlineSpellTextView) {
             self.parent = parent
@@ -97,7 +119,11 @@ struct InlineSpellTextView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            parent.text = textView.string
+
+            // Track the text we're sending to prevent updateNSView from echoing it back
+            let newText = textView.string
+            lastSentText = newText
+            parent.text = newText
 
             // Schedule spell check with debounce
             if isSpellCheckEnabled {
@@ -118,13 +144,18 @@ struct InlineSpellTextView: NSViewRepresentable {
         }
 
         func runSpellCheck() async {
-            guard let textView = textView, isSpellCheckEnabled else { return }
+            guard let textView = textView, isSpellCheckEnabled else {
+                print("🔤 [InlineSpell] Skipped - textView: \(textView != nil), enabled: \(isSpellCheckEnabled)")
+                return
+            }
 
             // Capture text on main thread
             let text = textView.string
+            print("🔤 [InlineSpell] Running spell check on \(text.count) characters")
 
             // Find misspelled words (async)
             let misspelledRanges = await findMisspelledWords(in: text)
+            print("🔤 [InlineSpell] Found \(misspelledRanges.count) misspelled words")
 
             // Apply highlighting (we're already on MainActor)
             applySpellCheckHighlighting(textView: textView, misspelledRanges: misspelledRanges)
@@ -137,8 +168,12 @@ struct InlineSpellTextView: NSViewRepresentable {
 
             // Ensure dictionary is loaded
             if await !spellEngine.isDictionaryLoaded() {
+                print("🔤 [InlineSpell] Loading dictionary...")
                 await spellEngine.loadDictionary()
             }
+
+            let wordCount = await spellEngine.wordCount()
+            print("🔤 [InlineSpell] Dictionary has \(wordCount) words")
 
             // Extract words with their ranges
             let wordPattern = try? NSRegularExpression(pattern: "\\b[a-zA-Z']+\\b", options: [])
@@ -167,7 +202,12 @@ struct InlineSpellTextView: NSViewRepresentable {
         }
 
         func applySpellCheckHighlighting(textView: SpellCheckTextView, misspelledRanges: [(range: NSRange, word: String, suggestions: [String])]) {
-            guard let textStorage = textView.textStorage else { return }
+            guard let textStorage = textView.textStorage else {
+                print("🔤 [ApplyHighlight] No textStorage!")
+                return
+            }
+
+            print("🔤 [ApplyHighlight] Applying \(misspelledRanges.count) underlines")
 
             // Remove existing spell check attributes
             let fullRange = NSRange(location: 0, length: textStorage.length)
@@ -178,20 +218,26 @@ struct InlineSpellTextView: NSViewRepresentable {
             // Store misspelled info for right-click menu
             textView.misspelledWords = misspelledRanges
 
-            // Apply red underline to misspelled words
+            // Apply THICK RED underline to misspelled words (very visible)
             for item in misspelledRanges {
                 // Ensure range is valid
                 guard item.range.location + item.range.length <= textStorage.length else { continue }
 
-                textStorage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: item.range)
-                textStorage.addAttribute(.underlineColor, value: NSColor.systemPurple.withAlphaComponent(0.6), range: item.range)
+                // Use thick underline for visibility
+                textStorage.addAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue, range: item.range)
+                textStorage.addAttribute(.underlineColor, value: NSColor.systemRed, range: item.range)
 
                 // Add tooltip with suggestions
                 if !item.suggestions.isEmpty {
                     let tooltip = "Did you mean: \(item.suggestions.prefix(3).joined(separator: ", "))?"
                     textStorage.addAttribute(.toolTip, value: tooltip, range: item.range)
                 }
+
+                print("🔤 [ApplyHighlight] Underlined '\(item.word)' at \(item.range)")
             }
+
+            // Force view refresh
+            textView.needsDisplay = true
         }
     }
 }
@@ -200,6 +246,16 @@ struct InlineSpellTextView: NSViewRepresentable {
 
 class SpellCheckTextView: NSTextView {
     var misspelledWords: [(range: NSRange, word: String, suggestions: [String])] = []
+
+    // Fix keyboard focus issues - ensure this view takes focus properly
+    override var acceptsFirstResponder: Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        let result = super.becomeFirstResponder()
+        // Ensure window is key when we get focus
+        window?.makeKey()
+        return result
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()

@@ -31,14 +31,20 @@ struct BrainPhArtApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // Empty WindowGroup - we use our own FloatingPanel instead
+        // Empty WindowGroup - we use our own window instead
         WindowGroup {
             Color.clear
                 .frame(width: 0, height: 0)
                 .onAppear {
-                    // Hide the default window, use our FloatingPanel
+                    // Hide the default window, show our main window
                     DispatchQueue.main.async {
-                        NSApp.windows.first?.orderOut(nil)
+                        // Close any SwiftUI-created windows
+                        for window in NSApp.windows where window != appDelegate.mainWindow {
+                            window.orderOut(nil)
+                        }
+                        // Force app to foreground and show main window
+                        NSApp.setActivationPolicy(.regular)
+                        NSApp.activate(ignoringOtherApps: true)
                         appDelegate.showFloatingPanel()
                     }
                 }
@@ -59,12 +65,57 @@ enum WindowMode {
 @MainActor
 class AppState: ObservableObject {
     static let shared = AppState()
-    @Published var windowMode: WindowMode = .full  // Opens to main window by default
+    @Published var windowMode: WindowMode = .full  // Main window first
+
+    // Focus restoration for dictation
+    var previousApp: NSRunningApplication?
+    var wasInternalDictation: Bool = false  // True if dictating into BrainPhArt itself
 
     // Legacy compatibility
     var isFloatingMode: Bool {
         get { windowMode != .full }
         set { windowMode = newValue ? .micro : .full }
+    }
+
+    /// Save the currently focused app before starting recording
+    func saveFocusedApp() {
+        previousApp = NSWorkspace.shared.frontmostApplication
+        // Check if it's us - internal dictation
+        wasInternalDictation = previousApp?.bundleIdentifier == Bundle.main.bundleIdentifier
+        print("📍 Saved focus: \(previousApp?.localizedName ?? "none"), internal: \(wasInternalDictation)")
+    }
+
+    /// Restore focus to the previously focused app
+    func restoreFocus() {
+        guard let app = previousApp else {
+            print("📍 No previous app to restore focus to")
+            return
+        }
+
+        print("📍 Restoring focus to: \(app.localizedName ?? "unknown")")
+
+        if wasInternalDictation {
+            // For internal dictation, we need to activate main window and focus its text field
+            if let delegate = NSApp.delegate as? AppDelegate {
+                // First hide the floating panel
+                delegate.floatingPanel?.orderOut(nil)
+                // Then show main window and focus chat input
+                delegate.mainWindow?.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                // Post notification to focus the chat input
+                NotificationCenter.default.post(name: .focusChatInput, object: nil)
+            }
+        } else {
+            // External app - hide our panel first, then activate the other app
+            if let delegate = NSApp.delegate as? AppDelegate {
+                delegate.floatingPanel?.orderOut(nil)
+            }
+            app.activate(options: [])
+        }
+
+        // Clear saved state
+        previousApp = nil
+        wasInternalDictation = false
     }
 }
 
@@ -72,7 +123,8 @@ class AppState: ObservableObject {
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var floatingPanel: FloatingPanel?
+    var floatingPanel: FloatingPanel?  // Borderless pill for dictation
+    var mainWindow: NSWindow?          // Regular window (NOT floating) for editing
     let appState = AppState.shared
 
     // Window sizes for 3 modes
@@ -91,24 +143,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func showFloatingPanel() {
+        // Start with main window (full mode with traffic lights)
+        if appState.windowMode == .full {
+            showMainWindow()
+            setupModeWatcher()
+            return
+        }
+
+        // For floating modes, create the borderless pill
         if floatingPanel != nil {
             floatingPanel?.makeKeyAndOrderFront(nil)
             return
         }
 
-        // Create the panel - start in FULL mode with title bar
+        createFloatingPill()
+        setupModeWatcher()
+    }
+
+    private func createFloatingPill() {
         guard let screen = NSScreen.main else { return }
         let screenFrame = screen.visibleFrame
 
-        // Start with full size, centered
-        let startWidth: CGFloat = 1100
-        let startHeight: CGFloat = 700
+        // Borderless floating pill for dictation
+        let startWidth: CGFloat = mediumSize.width
+        let startHeight: CGFloat = mediumSize.height
         let x = (screenFrame.width - startWidth) / 2 + screenFrame.origin.x
-        let y = (screenFrame.height - startHeight) / 2 + screenFrame.origin.y
+        let y = screenFrame.maxY - startHeight - 40
 
         let panel = FloatingPanel(
             contentRect: NSRect(x: x, y: y, width: startWidth, height: startHeight),
-            showsTitleBar: true  // Show traffic lights and allow resize
+            showsTitleBar: false  // Borderless - no traffic lights
         )
 
         // Embed SwiftUI ContentView
@@ -121,6 +185,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         panel.makeKeyAndOrderFront(nil)
         floatingPanel = panel
+    }
+
+    private var cancellables = Set<AnyCancellable>()
+    private var modeWatcherSetup = false
+
+    private func setupModeWatcher() {
+        guard !modeWatcherSetup else { return }
+        modeWatcherSetup = true
 
         // Watch for mode changes
         appState.$windowMode
@@ -131,68 +203,90 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
-    private var cancellables = Set<AnyCancellable>()
-
     func updateWindowForMode(_ mode: WindowMode) {
-        guard let panel = floatingPanel else { return }
-
         switch mode {
-        case .micro:
-            // Tiny pill - floating, on top
+        case .micro, .medium:
+            // Hide main window, show floating pill
+            mainWindow?.orderOut(nil)
+
+            // Create floating pill if needed
+            if floatingPanel == nil {
+                createFloatingPill()
+            }
+
+            guard let panel = floatingPanel else { return }
             panel.level = .floating
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             panel.isOpaque = false
             panel.backgroundColor = .clear
 
+            let size = mode == .micro ? microSize : mediumSize
+
             if let screen = NSScreen.main {
                 let screenFrame = screen.visibleFrame
-                let x = (screenFrame.width - microSize.width) / 2 + screenFrame.origin.x
-                let y = screenFrame.maxY - microSize.height - 40
+                let x = (screenFrame.width - size.width) / 2 + screenFrame.origin.x
+                let y = screenFrame.maxY - size.height - 40
                 panel.setFrame(
-                    NSRect(x: x, y: y, width: microSize.width, height: microSize.height),
+                    NSRect(x: x, y: y, width: size.width, height: size.height),
                     display: true,
                     animate: true
                 )
             }
-
-        case .medium:
-            // Medium floating recorder - floating, on top
-            panel.level = .floating
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            panel.isOpaque = false
-            panel.backgroundColor = .clear
-
-            if let screen = NSScreen.main {
-                let screenFrame = screen.visibleFrame
-                let x = (screenFrame.width - mediumSize.width) / 2 + screenFrame.origin.x
-                let y = screenFrame.maxY - mediumSize.height - 40
-                panel.setFrame(
-                    NSRect(x: x, y: y, width: mediumSize.width, height: mediumSize.height),
-                    display: true,
-                    animate: true
-                )
-            }
+            panel.makeKeyAndOrderFront(nil)
 
         case .full:
-            // Full main UI - normal level, larger, opaque
-            panel.level = .normal
-            panel.collectionBehavior = [.managed, .fullScreenPrimary]
-            panel.isOpaque = true
-            panel.backgroundColor = NSColor.windowBackgroundColor
+            // Hide floating pill, show main window with traffic lights
+            floatingPanel?.orderOut(nil)
+            showMainWindow()
+        }
+    }
 
-            if let screen = NSScreen.main {
-                let screenFrame = screen.visibleFrame
-                let x = (screenFrame.width - fullSize.width) / 2 + screenFrame.origin.x
-                let y = (screenFrame.height - fullSize.height) / 2 + screenFrame.origin.y
-                panel.setFrame(
-                    NSRect(x: x, y: y, width: fullSize.width, height: fullSize.height),
-                    display: true,
-                    animate: true
-                )
-            }
+    func showMainWindow() {
+        if mainWindow == nil {
+            // Create REGULAR NSWindow (NOT panel) - proper app window
+            guard let screen = NSScreen.main else { return }
+            let screenFrame = screen.visibleFrame
+            let x = (screenFrame.width - fullSize.width) / 2 + screenFrame.origin.x
+            let y = (screenFrame.height - fullSize.height) / 2 + screenFrame.origin.y
+
+            // Regular NSWindow with traffic lights
+            let window = NSWindow(
+                contentRect: NSRect(x: x, y: y, width: fullSize.width, height: fullSize.height),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+
+            window.title = "BrainPhArt"
+
+            // Same content view
+            let contentView = ContentView()
+                .environmentObject(appState)
+
+            let hostingView = NSHostingView(rootView: contentView)
+            hostingView.autoresizingMask = [.width, .height]
+            window.contentView = hostingView
+
+            // Normal window behavior (not floating)
+            window.level = .normal
+            window.collectionBehavior = [.managed, .fullScreenPrimary]
+            window.isOpaque = true
+            window.backgroundColor = NSColor.windowBackgroundColor
+            window.isReleasedWhenClosed = false
+
+            mainWindow = window
         }
 
-        panel.makeKeyAndOrderFront(nil)
+        // Activate app and make window key
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        mainWindow?.makeKeyAndOrderFront(nil)
+        mainWindow?.makeMain()
+
+        // Force first responder to the window's content
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.mainWindow?.makeFirstResponder(self?.mainWindow?.contentView)
+        }
     }
 
     nonisolated func registerGlobalHotkeys() {
@@ -215,18 +309,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     static func handleGlobalKeyEvent(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
-        // Ctrl+Shift+Space - Toggle recording
+        // Ctrl+Shift+Space - Toggle recording via floating panel
         let hasCtrl = modifiers.contains(.control)
         let hasShift = modifiers.contains(.shift)
         let isSpace = keyCode == 49
 
         if hasCtrl && hasShift && isSpace {
             print("🎤 Hotkey triggered: Ctrl+Shift+Space")
-            // Show the app first
-            NSApp.activate(ignoringOtherApps: true)
+
+            // CRITICAL: Save focused app BEFORE we take focus
+            // This allows us to restore focus and paste into the original app after transcription
+            AppState.shared.saveFocusedApp()
+
+            // ALWAYS switch to floating mode when using hotkey
+            // This is the dictation workflow - quick record, transcribe, paste
             if let delegate = NSApp.delegate as? AppDelegate {
-                delegate.floatingPanel?.makeKeyAndOrderFront(nil)
+                // Switch to medium floating mode for dictation
+                AppState.shared.windowMode = .medium
+
+                // Create floating panel if needed (updateWindowForMode will handle this)
+                // But also ensure it's visible
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    delegate.floatingPanel?.orderFrontRegardless()
+                }
             }
+
             // Then toggle recording
             NotificationCenter.default.post(name: .toggleRecording, object: nil)
         }
@@ -257,4 +364,6 @@ extension Notification.Name {
     static let toggleRecording = Notification.Name("toggleRecording")
     static let cancelRecording = Notification.Name("cancelRecording")
     static let openSettings = Notification.Name("openSettings")
+    static let focusChatInput = Notification.Name("focusChatInput")
+    static let transcriptionReady = Notification.Name("transcriptionReady")  // Posted when transcript is ready to paste
 }

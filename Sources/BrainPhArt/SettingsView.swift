@@ -13,6 +13,14 @@ struct SettingsView: View {
     @AppStorage("outputDeviceID") private var outputDeviceID: String = ""
     @AppStorage("inputLevel") private var inputLevel: Double = 0.8
     @AppStorage("outputLevel") private var outputLevel: Double = 1.0
+    @AppStorage("spellCheckLanguage") private var spellCheckLanguage: String = "en-GB"
+    @AppStorage("llm_provider") private var llmProvider: String = "ollama"
+
+    @State private var claudeAPIKey: String = ""
+    @State private var openaiAPIKey: String = ""
+    @State private var geminiAPIKey: String = ""
+    @State private var openrouterAPIKey: String = ""
+    @State private var showAPIKeys: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -180,6 +188,140 @@ struct SettingsView: View {
                     Divider()
                         .padding(.vertical, 8)
 
+                    // SPELL CHECK LANGUAGE
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("SPELL CHECK")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+
+                        Picker("Language", selection: $spellCheckLanguage) {
+                            Text("British English").tag("en-GB")
+                            Text("American English").tag("en-US")
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: spellCheckLanguage) { newValue in
+                            // Reload dictionary when language changes
+                            Task {
+                                await SpellEngine.shared.reloadDictionary(language: newValue)
+                            }
+                        }
+                    }
+
+                    Divider()
+                        .padding(.vertical, 8)
+
+                    // LLM PROVIDER
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("AI PROVIDER")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+
+                        Picker("Provider", selection: $llmProvider) {
+                            ForEach(LLMProvider.allCases) { provider in
+                                Text(provider.displayName).tag(provider.rawValue)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        // API Keys section
+                        HStack {
+                            Text("API Keys")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button(action: { showAPIKeys.toggle() }) {
+                                Image(systemName: showAPIKeys ? "eye.slash" : "eye")
+                                    .font(.system(size: 11))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.top, 8)
+
+                        // Claude API Key
+                        HStack {
+                            Text("Claude:")
+                                .font(.system(size: 11))
+                                .frame(width: 80, alignment: .leading)
+                            if showAPIKeys {
+                                TextField("sk-ant-...", text: $claudeAPIKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            } else {
+                                SecureField("sk-ant-...", text: $claudeAPIKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+                        }
+                        .onChange(of: claudeAPIKey) { newValue in
+                            Task { await LLMService.shared.setAPIKey(newValue, for: .claude) }
+                        }
+
+                        // OpenAI API Key
+                        HStack {
+                            Text("OpenAI:")
+                                .font(.system(size: 11))
+                                .frame(width: 80, alignment: .leading)
+                            if showAPIKeys {
+                                TextField("sk-...", text: $openaiAPIKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            } else {
+                                SecureField("sk-...", text: $openaiAPIKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+                        }
+                        .onChange(of: openaiAPIKey) { newValue in
+                            Task { await LLMService.shared.setAPIKey(newValue, for: .openai) }
+                        }
+
+                        // Gemini API Key
+                        HStack {
+                            Text("Gemini:")
+                                .font(.system(size: 11))
+                                .frame(width: 80, alignment: .leading)
+                            if showAPIKeys {
+                                TextField("AIza...", text: $geminiAPIKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            } else {
+                                SecureField("AIza...", text: $geminiAPIKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+                        }
+                        .onChange(of: geminiAPIKey) { newValue in
+                            Task { await LLMService.shared.setAPIKey(newValue, for: .gemini) }
+                        }
+
+                        // OpenRouter API Key
+                        HStack {
+                            Text("OpenRouter:")
+                                .font(.system(size: 11))
+                                .frame(width: 80, alignment: .leading)
+                            if showAPIKeys {
+                                TextField("sk-or-...", text: $openrouterAPIKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            } else {
+                                SecureField("sk-or-...", text: $openrouterAPIKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+                        }
+                        .onChange(of: openrouterAPIKey) { newValue in
+                            Task { await LLMService.shared.setAPIKey(newValue, for: .openrouter) }
+                        }
+
+                        Text("Ollama runs locally - no API key needed")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .padding(.top, 4)
+                    }
+
+                    Divider()
+                        .padding(.vertical, 8)
+
                     // LOCATIONS (read-only)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("STORAGE LOCATIONS")
@@ -219,8 +361,17 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 400, height: 500)
+        .frame(width: 400, height: 700)
         .background(Color(NSColor.windowBackgroundColor))
+        .onAppear {
+            // Load existing API keys from Keychain
+            Task {
+                claudeAPIKey = await LLMService.shared.getAPIKey(for: .claude) ?? ""
+                openaiAPIKey = await LLMService.shared.getAPIKey(for: .openai) ?? ""
+                geminiAPIKey = await LLMService.shared.getAPIKey(for: .gemini) ?? ""
+                openrouterAPIKey = await LLMService.shared.getAPIKey(for: .openrouter) ?? ""
+            }
+        }
     }
 
 }
