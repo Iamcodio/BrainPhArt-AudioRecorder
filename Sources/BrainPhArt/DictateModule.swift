@@ -123,7 +123,6 @@ struct DictateTabView: View {
                         TranscriptComparisonView(
                             originalText: $editedTranscript,
                             suggestedText: $suggestedText,
-                            isPrivateSession: isPrivateMode,
                             onAcceptAll: acceptSuggestions,
                             onRejectAll: rejectSuggestions,
                             onAddToVocabulary: { word in

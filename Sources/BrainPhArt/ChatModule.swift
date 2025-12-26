@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import UniformTypeIdentifiers
 
 // MARK: - Chat Models
 
@@ -8,14 +9,12 @@ struct ChatMessage: Identifiable, Codable {
     let role: MessageRole
     let content: String
     let timestamp: Date
-    var model: String?
 
-    init(role: MessageRole, content: String, model: String? = nil) {
+    init(role: MessageRole, content: String) {
         self.id = UUID().uuidString
         self.role = role
         self.content = content
         self.timestamp = Date()
-        self.model = model
     }
 }
 
@@ -32,15 +31,13 @@ struct ChatConversation: Identifiable, Codable {
     var createdAt: Date
     var updatedAt: Date
     var systemPrompt: String?
-    var model: String
 
-    init(title: String = "New Chat", model: String = "llama3.2") {
+    init(title: String = "New Chat") {
         self.id = UUID().uuidString
         self.title = title
         self.messages = []
         self.createdAt = Date()
         self.updatedAt = Date()
-        self.model = model
     }
 
     var preview: String {
@@ -76,8 +73,8 @@ class ChatManager: ObservableObject {
         }
     }
 
-    func createConversation(model: String) -> ChatConversation {
-        let conv = ChatConversation(model: model)
+    func createConversation() -> ChatConversation {
+        let conv = ChatConversation()
         conversations.insert(conv, at: 0)
         currentConversationId = conv.id
         saveConversations()
@@ -139,14 +136,9 @@ struct ChatTabView: View {
     @StateObject private var chatManager = ChatManager.shared
     @State private var inputText = ""
     @State private var isLoading = false
-    // Chat has its own provider/model selection, separate from global settings
-    @State private var selectedProvider: LLMProvider = {
-        let raw = UserDefaults.standard.string(forKey: "chat_provider") ?? "claude"
-        return LLMProvider(rawValue: raw) ?? .claude
-    }()
-    @State private var selectedModel: String = UserDefaults.standard.string(forKey: "chat_model") ?? "claude-sonnet-4-5-20250929"
     @State private var showSettings = false
     @State private var temperature: Double = 0.7
+    @State private var isDropTargeted = false
 
     var body: some View {
         HSplitView {
@@ -155,7 +147,7 @@ struct ChatTabView: View {
                 conversations: chatManager.conversations,
                 selectedId: chatManager.currentConversationId,
                 onSelect: { chatManager.currentConversationId = $0 },
-                onNew: { _ = chatManager.createConversation(model: selectedModel) },
+                onNew: { _ = chatManager.createConversation() },
                 onDelete: { chatManager.deleteConversation(id: $0) }
             )
             .frame(minWidth: 200, maxWidth: 280)
@@ -167,28 +159,28 @@ struct ChatTabView: View {
                     ChatMessagesView(messages: conversation.messages, isLoading: isLoading)
                 } else {
                     EmptyChatView(onNewChat: {
-                        _ = chatManager.createConversation(model: selectedModel)
+                        _ = chatManager.createConversation()
                     })
                 }
 
                 Divider()
 
-                // Input Area
+                // Input Area with drag-drop support
                 ChatInputBar(
                     text: $inputText,
                     isLoading: isLoading,
-                    selectedModel: $selectedModel,
-                    selectedProvider: $selectedProvider,
+                    isDropTargeted: $isDropTargeted,
                     onSend: sendMessage,
                     onShowSettings: { showSettings.toggle() }
                 )
+            }
+            .onDrop(of: [.fileURL, .text], isTargeted: $isDropTargeted) { providers in
+                handleDrop(providers: providers)
             }
 
             // Right: Settings Panel (optional)
             if showSettings {
                 ChatSettingsPanel(
-                    selectedProvider: $selectedProvider,
-                    selectedModel: $selectedModel,
                     temperature: $temperature,
                     systemPrompt: Binding(
                         get: { chatManager.currentConversation?.systemPrompt ?? "" },
@@ -199,18 +191,39 @@ struct ChatTabView: View {
                 .frame(width: 280)
             }
         }
-        // Persist provider selection and update model when provider changes
-        .onChange(of: selectedProvider) { newProvider in
-            UserDefaults.standard.set(newProvider.rawValue, forKey: "chat_provider")
-            // Reset to default model for new provider if current model doesn't belong
-            let validModels = newProvider.availableModels.map { $0.id }
-            if !validModels.contains(selectedModel) {
-                selectedModel = newProvider.defaultModel
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        for provider in providers {
+            // Handle file URLs (.txt, .md)
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { data, error in
+                    guard let urlData = data as? Data,
+                          let url = URL(dataRepresentation: urlData, relativeTo: nil),
+                          ["txt", "md", "text"].contains(url.pathExtension.lowercased()) else { return }
+
+                    if let content = try? String(contentsOf: url, encoding: .utf8) {
+                        DispatchQueue.main.async {
+                            inputText += (inputText.isEmpty ? "" : "\n\n") + content
+                        }
+                    }
+                }
+                return true
+            }
+
+            // Handle plain text
+            if provider.hasItemConformingToTypeIdentifier(UTType.text.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.text.identifier, options: nil) { data, error in
+                    if let text = data as? String {
+                        DispatchQueue.main.async {
+                            inputText += (inputText.isEmpty ? "" : "\n\n") + text
+                        }
+                    }
+                }
+                return true
             }
         }
-        .onChange(of: selectedModel) { newModel in
-            UserDefaults.standard.set(newModel, forKey: "chat_model")
-        }
+        return false
     }
 
     private func sendMessage() {
@@ -222,7 +235,7 @@ struct ChatTabView: View {
         if let currentId = chatManager.currentConversationId {
             conversationId = currentId
         } else {
-            let newConv = chatManager.createConversation(model: selectedModel)
+            let newConv = chatManager.createConversation()
             conversationId = newConv.id
         }
 
@@ -232,22 +245,18 @@ struct ChatTabView: View {
         isLoading = true
 
         Task {
-            // Build messages for context
             let conversation = chatManager.conversations.first { $0.id == conversationId }
             let systemPrompt = conversation?.systemPrompt
 
             let response = await LLMService.shared.send(
                 prompt: prompt,
-                systemPrompt: systemPrompt,
-                provider: selectedProvider,
-                model: selectedModel
+                systemPrompt: systemPrompt
             )
 
             await MainActor.run {
                 let assistantMessage = ChatMessage(
                     role: .assistant,
-                    content: response.isSuccess ? response.text : "Error: \(response.error ?? "Unknown")",
-                    model: response.model
+                    content: response.isSuccess ? response.text : "Error: \(response.error ?? "Unknown")"
                 )
                 chatManager.addMessage(assistantMessage, to: conversationId)
                 isLoading = false
@@ -362,7 +371,7 @@ struct ChatMessagesView: View {
                         HStack {
                             ProgressView()
                                 .scaleEffect(0.8)
-                            Text("Thinking...")
+                            Text("Claude is thinking...")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             Spacer()
@@ -388,14 +397,14 @@ struct MessageBubble: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             if message.role == .assistant {
-                // AI Avatar
+                // Claude Avatar
                 Circle()
-                    .fill(Color.purple.opacity(0.2))
+                    .fill(Color.orange.opacity(0.2))
                     .frame(width: 32, height: 32)
                     .overlay(
-                        Image(systemName: "brain.head.profile")
+                        Image(systemName: "brain")
                             .font(.system(size: 14))
-                            .foregroundColor(.purple)
+                            .foregroundColor(.orange)
                     )
             }
 
@@ -406,12 +415,6 @@ struct MessageBubble: View {
                     .padding(12)
                     .background(message.role == .user ? Color.accentColor.opacity(0.15) : Color(NSColor.controlBackgroundColor))
                     .cornerRadius(12)
-
-                if let model = message.model {
-                    Text(model)
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                }
             }
 
             if message.role == .user {
@@ -439,12 +442,19 @@ struct EmptyChatView: View {
         VStack(spacing: 20) {
             Spacer()
 
-            Image(systemName: "bubble.left.and.bubble.right")
+            Image(systemName: "brain")
                 .font(.system(size: 48))
+                .foregroundColor(.orange)
+
+            Text("Chat with Claude")
+                .font(.title2)
+
+            Text("Powered by Max Plan via CLI")
+                .font(.caption)
                 .foregroundColor(.secondary)
 
-            Text("Start a conversation")
-                .font(.title2)
+            Text("Drag & drop .txt/.md files to include in your message")
+                .font(.caption)
                 .foregroundColor(.secondary)
 
             Button(action: onNewChat) {
@@ -462,8 +472,7 @@ struct EmptyChatView: View {
 struct ChatInputBar: View {
     @Binding var text: String
     let isLoading: Bool
-    @Binding var selectedModel: String
-    @Binding var selectedProvider: LLMProvider
+    @Binding var isDropTargeted: Bool
     let onSend: () -> Void
     let onShowSettings: () -> Void
 
@@ -473,7 +482,7 @@ struct ChatInputBar: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 // Text input
-                TextField("Send a message", text: $text, axis: .vertical)
+                TextField("Send a message to Claude...", text: $text, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...5)
                     .focused($isInputFocused)
@@ -483,60 +492,23 @@ struct ChatInputBar: View {
                         }
                     }
                     .onReceive(NotificationCenter.default.publisher(for: .focusChatInput)) { _ in
-                        // Delay to ensure window is active first
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                             isInputFocused = true
-                            print("📍 Chat input focused for internal dictation")
                         }
                     }
 
-                // Provider picker
-                Menu {
-                    ForEach(LLMProvider.allCases) { provider in
-                        Button(action: { selectedProvider = provider }) {
-                            HStack {
-                                Text(provider.displayName)
-                                if selectedProvider == provider {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: providerIcon)
-                        Text(selectedProvider.rawValue)
-                            .font(.system(size: 11))
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.08))
-                    .cornerRadius(6)
-                }
-                .menuStyle(.borderlessButton)
-
-                // Model picker - uses availableModels from LLMProvider
-                Menu {
-                    ForEach(selectedProvider.availableModels, id: \.id) { model in
-                        Button(action: { selectedModel = model.id }) {
-                            HStack {
-                                Text(model.name)
-                                if selectedModel == model.id {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    Text(currentModelName)
+                // Claude badge
+                HStack(spacing: 4) {
+                    Image(systemName: "brain")
+                        .font(.system(size: 10))
+                    Text("Claude")
                         .font(.system(size: 11))
-                        .lineLimit(1)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.primary.opacity(0.08))
-                        .cornerRadius(6)
                 }
-                .menuStyle(.borderlessButton)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.orange.opacity(0.15))
+                .foregroundColor(.orange)
+                .cornerRadius(6)
 
                 // Settings button
                 Button(action: onShowSettings) {
@@ -555,34 +527,17 @@ struct ChatInputBar: View {
             }
             .padding()
         }
-        .background(Color(NSColor.controlBackgroundColor))
-    }
-
-    private var providerIcon: String {
-        switch selectedProvider {
-        case .claude: return "brain"
-        case .openai: return "sparkles"
-        case .gemini: return "globe"
-        case .openrouter: return "network"
-        case .ollama: return "desktopcomputer"
-        }
-    }
-
-    private var currentModelName: String {
-        // Find friendly name for current model ID
-        if let model = selectedProvider.availableModels.first(where: { $0.id == selectedModel }) {
-            return model.name
-        }
-        // Fallback to model ID if not found
-        return selectedModel
+        .background(isDropTargeted ? Color.accentColor.opacity(0.1) : Color(NSColor.controlBackgroundColor))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isDropTargeted ? Color.accentColor : Color.clear, lineWidth: 2)
+        )
     }
 }
 
 // MARK: - Chat Settings Panel
 
 struct ChatSettingsPanel: View {
-    @Binding var selectedProvider: LLMProvider
-    @Binding var selectedModel: String
     @Binding var temperature: Double
     @Binding var systemPrompt: String
     let onClose: () -> Void
@@ -606,19 +561,12 @@ struct ChatSettingsPanel: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    // Temperature
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Temperature")
-                                .font(.system(size: 11, weight: .medium))
-                            Spacer()
-                            Text(String(format: "%.1f", temperature))
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(.secondary)
-                        }
-                        Slider(value: $temperature, in: 0...2, step: 0.1)
-                        Text("Lower = more focused, Higher = more creative")
-                            .font(.system(size: 10))
+                    // Info
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.secondary)
+                        Text("Using Claude CLI (Max Plan)")
+                            .font(.system(size: 12))
                             .foregroundColor(.secondary)
                     }
 
@@ -637,7 +585,7 @@ struct ChatSettingsPanel: View {
                                     .stroke(Color.primary.opacity(0.1), lineWidth: 1)
                             )
 
-                        Text("Instructions for the AI assistant")
+                        Text("Instructions for Claude")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }

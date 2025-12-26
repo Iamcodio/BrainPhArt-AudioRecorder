@@ -11,9 +11,6 @@ struct TranscriptComparisonView: View {
     @State private var showDiff = true
     @State private var isProcessing = false
     @State private var selectedPromptId: String = "cleanup"
-    @State private var wasRedirectedToLocal = false
-
-    var isPrivateSession: Bool = false
 
     let onAcceptAll: () -> Void
     let onRejectAll: () -> Void
@@ -25,20 +22,6 @@ struct TranscriptComparisonView: View {
             HStack {
                 Text("Review Suggestions")
                     .font(.headline)
-
-                // Privacy indicator
-                if isPrivateSession {
-                    HStack(spacing: 4) {
-                        Image(systemName: "lock.fill")
-                        Text("LOCAL ONLY")
-                    }
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.orange)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.orange.opacity(0.15))
-                    .cornerRadius(4)
-                }
 
                 Spacer()
 
@@ -90,19 +73,6 @@ struct TranscriptComparisonView: View {
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
-
-            // Show redirect warning if content was sent to local
-            if wasRedirectedToLocal {
-                HStack(spacing: 4) {
-                    Image(systemName: "lock.shield")
-                    Text("Private content detected - processed locally with Ollama")
-                }
-                .font(.system(size: 10))
-                .foregroundColor(.orange)
-                .padding(.horizontal)
-                .padding(.vertical, 4)
-                .background(Color.orange.opacity(0.1))
-            }
 
             Divider()
 
@@ -267,7 +237,6 @@ struct TranscriptComparisonView: View {
 
     private func requestLLMSuggestions() {
         isProcessing = true
-        wasRedirectedToLocal = false
 
         Task {
             // Get the selected prompt or use default
@@ -289,13 +258,10 @@ struct TranscriptComparisonView: View {
 
             let response = await LLMService.shared.send(
                 prompt: prompt.buildUserPrompt(with: originalText),
-                systemPrompt: prompt.systemPrompt,
-                isPrivateSession: isPrivateSession
+                systemPrompt: prompt.systemPrompt
             )
 
             await MainActor.run {
-                wasRedirectedToLocal = response.wasRedirectedToLocal
-
                 if response.isSuccess {
                     suggestedText = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 } else {

@@ -346,6 +346,7 @@ enum MainTab: String, CaseIterable {
     case edit = "EDIT"
     case cards = "CARDS"
     case chat = "CHAT"
+    case terminal = "TERMINAL"
 
     var icon: String {
         switch self {
@@ -354,6 +355,7 @@ enum MainTab: String, CaseIterable {
         case .edit: return "textformat"
         case .cards: return "rectangle.stack"
         case .chat: return "bubble.left.and.bubble.right"
+        case .terminal: return "terminal.fill"
         }
     }
 }
@@ -473,6 +475,9 @@ struct MainView: View {
 
             case .chat:
                 ChatTabView()
+
+            case .terminal:
+                TerminalTabView()
             }
         }
         .frame(minWidth: 900, minHeight: 600)
